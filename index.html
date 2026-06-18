@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+  <meta name="theme-color" content="#F59E0B"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="AutoDiag Pro"/>
+  <meta name="description" content="אפליקציית אבחון רכב מקצועית — 322 קודי תקלה, מחשבון אבחון, סורק ELM327, חיישנים, חיווט"/>
+  <link rel="manifest" href="/autodiag-pro/manifest.json"/>
+  <link rel="icon" href="/autodiag-pro/icon.svg" type="image/svg+xml"/>
+  <link rel="apple-touch-icon" href="/autodiag-pro/icon.svg"/>
+  <title>AutoDiag Pro — אבחון רכב</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:#0F172A;overflow-x:hidden}
+    #root{min-height:100vh}
+  </style>
+  <script type="module" crossorigin src="/autodiag-pro/assets/index-opd5TNjq.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    if('serviceWorker' in navigator){
+      window.addEventListener('load',()=>{
+        navigator.serviceWorker.register('/autodiag-pro/sw.js').catch(()=>{});
+      });
+    }
+  </script>
+</body>
+</html>
