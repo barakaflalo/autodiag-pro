@@ -23,9 +23,9 @@ CacheStorage.prototype.match=function(){return sm.apply(this,arguments).then(cle
    Page (navigation): network first (4s), cache as offline fallback → new uploads always win when online.
    Files in assets/ have a content hash in their name → cache first.
    VERSION goes up with every release (same number as APP_VERSION and manifest). */
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const CACHE = 'autodiag-' + VERSION;
-const PRECACHE = ["./","./manifest.json","./privacy_policy.html","./icon.svg","./icon-192.png","./icon-512.png","./assets/index-NgrzyBY7.js"];
+const PRECACHE = ["./","./manifest.json","./privacy_policy.html","./icon.svg","./icon-192.png","./icon-512.png","./assets/index-Bm7FixCm.js"];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -50,6 +50,7 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // YouTube, Google, wa.me — not ours
+  if (url.pathname.includes('/api/')) return;      // live data (plate lookup) — never cached here
 
   if (req.mode === 'navigate') {
     // only the app page itself is stored as the offline shell ("./"); other pages are cached under their own URL

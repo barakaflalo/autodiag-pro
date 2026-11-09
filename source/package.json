@@ -1,7 +1,7 @@
 {
   "name": "autodiag-pro",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
   "scripts": { "build": "vite build" },
   "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1" },

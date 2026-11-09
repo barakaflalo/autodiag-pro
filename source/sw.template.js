@@ -50,6 +50,7 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // YouTube, Google, wa.me — not ours
+  if (url.pathname.includes('/api/')) return;      // live data (plate lookup) — never cached here
 
   if (req.mode === 'navigate') {
     // only the app page itself is stored as the offline shell ("./"); other pages are cached under their own URL

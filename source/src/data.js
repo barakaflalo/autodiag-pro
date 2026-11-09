@@ -470,3 +470,21 @@ const DICT = [
 ];
 
 export { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT };
+
+// Israeli registry maker names (Hebrew, as in data.gov.il) → English make used in the app.
+export const MAKE_HE = [
+  ["טויוטה","Toyota"],["לקסוס","Lexus"],["הונדה","Honda"],["יונדאי","Hyundai"],["קיה","Kia"],["ניסאן","Nissan"],["אינפיניטי","Infiniti"],
+  ["מזדה","Mazda"],["מאזדה","Mazda"],["מיצובישי","Mitsubishi"],["מרוטי סוזוקי","Suzuki"],["סוזוקי","Suzuki"],["סובארו","Subaru"],["דייהטסו","Daihatsu"],["איסוזו","Isuzu"],
+  ["פורד","Ford"],["שברולט","Chevrolet"],["ביואיק","Buick"],["קאדילק","Cadillac"],["קרייזלר","Chrysler"],["דיימלר קרייזלר","Chrysler"],["דודג","Dodge"],["ג'יפ","Jeep"],["טסלה","Tesla"],
+  ["ב מ וו","BMW"],["ב.מ.וו","BMW"],["מיני","Mini"],["מרצדס","Mercedes-Benz"],["אאודי","Audi"],["פולקסווגן","Volkswagen"],["סקודה","Skoda"],["סיאט","Seat"],["קופרה","Cupra"],["פורשה","Porsche"],
+  ["פיג'ו","Peugeot"],["סיטרואן","Citroën"],["די.אס","DS"],["רנו","Renault"],["דאצ'יה","Dacia"],["פיאט","Fiat"],["אלפא רומיאו","Alfa Romeo"],["אופל","Opel"],["וולוו","Volvo"],
+  ["לנד רובר","Land Rover"],["ריינג' רובר","Land Rover"],["רובר","Land Rover"],["יגואר","Jaguar"],
+  ["מ.ג'י","MG"],["אם ג'י","MG"],["צ'רי","Chery"],["ג'ילי","Geely"],["בי ווי די","BYD"],["בי.ווי.די","BYD"],["גרייט וול","Great Wall"],["האוול","Great Wall"],["סאנגיונג","Ssangyong"],["קיי ג'י מובילי","Ssangyong"],
+  ["אקספנג","XPeng"],["זיקר","Zeekr"],["לינק","Lynk & Co"],["אורה","GWM Ora"],["ג'אקו","Jaecoo"],["אומודה","Omoda"],["פולסטאר","Polestar"],["סרס","Seres"],["ליפמוטור","Leapmotor"],["דונגפנג","Dongfeng"],["ג'ק","JAC"],["צ'אנג","Changan"],
+];
+export function makeFromHe(name){
+  const s = String(name||"").trim(); if(!s) return "";
+  let best = "", len = 0;
+  for(const [he,en] of MAKE_HE){ if(s.startsWith(he) && he.length>len){ best=en; len=he.length; } }
+  return best;
+}

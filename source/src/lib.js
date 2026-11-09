@@ -112,7 +112,7 @@ export function openExt(url){
 
 
 // ═══ App context shared with non-React helpers (print/share) ═══
-export const APP_VERSION = "1.2.0";
+export const APP_VERSION = "1.3.0";
 export const ctx = { lang: "he", user: { name: "", phone: "" } };
 export const ABOUT = {
   title: "AutoDiag Pro",
@@ -170,3 +170,115 @@ export function shareWhatsApp(title, text){
   openExt(`https://wa.me/?text=${encodeURIComponent(body)}`);
 }
 export const uid = ()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+
+// ═══ OBD-II mode helpers (pure, testable) ═══
+// Join ISO-TP frames ("0:..", "1:..") or plain lines into hex messages.
+export function elmMessages(raw){
+  const msgs=[]; let cur=null;
+  for(const l of elmLines(raw)){
+    const h=l.replace(/\s/g,"").toUpperCase();
+    const fr=h.match(/^([0-9A-F]):([0-9A-F]*)$/);
+    if(fr){ if(fr[1]==="0"){ cur={hex:fr[2]}; msgs.push(cur); } else if(cur){ cur.hex+=fr[2]; } continue; }
+    if(/^[0-9A-F]{3}$/.test(h)) continue;
+    if(/^[0-9A-F]+$/.test(h)){ msgs.push({hex:h}); cur=null; }
+  }
+  return msgs.map(m=>m.hex);
+}
+// Mode 09 PID 02 — VIN (CAN multi-frame or legacy 5-line form)
+export function parseVIN(raw){
+  const msgs = elmMessages(raw).filter(h=>h.startsWith("4902"));
+  let bytes=[];
+  if(msgs.length===1 && msgs[0].length>=40){ bytes = (msgs[0].slice(4).match(/../g)||[]).slice(1); } // CAN: 49 02 01 + 17 chars
+  else { for(const m of msgs){ bytes = bytes.concat((m.slice(4).match(/../g)||[]).slice(1)); } }         // legacy: 49 02 seq + 4 bytes
+  const s = bytes.map(b=>parseInt(b,16)).filter(n=>n>0).map(n=>String.fromCharCode(n)).join("").replace(/[^A-HJ-NPR-Z0-9]/gi,"").toUpperCase();
+  return s.length>=17 ? s.slice(-17) : "";
+}
+// Mode 01 PID 01 — MIL, DTC count and readiness monitors. data = hex after "4101"
+const RD_SPARK = ["catalyst","heatedCat","evap","secAir","ac","o2","o2Heater","egr"];
+const RD_DIESEL = ["nmhcCat","noxScr",null,"boost",null,"egs","pmFilter","egrVvt"];
+export function decodeReadiness(data){
+  const b = (String(data||"").match(/../g)||[]).map(x=>parseInt(x,16));
+  if(b.length<4 || b.some(isNaN)) return null;
+  const [A,B,C,D] = b;
+  const diesel = !!(B & 0x08);
+  const mon = [];
+  const add = (key, avail, incomplete) => { if(key && avail) mon.push({ key, done: !incomplete }); };
+  add("misfire", B&0x01, B&0x10); add("fuel", B&0x02, B&0x20); add("components", B&0x04, B&0x40);
+  const names = diesel ? RD_DIESEL : RD_SPARK;
+  for(let i=0;i<8;i++) add(names[i], C&(1<<i), D&(1<<i));
+  return { mil: !!(A&0x80), dtcCount: A&0x7F, diesel, monitors: mon };
+}
+// "4100BE3FA813" → Set of supported PIDs (hex strings) for that range
+export function parseSupported(raw, base){
+  const want = ("41"+base).toUpperCase(); const set = new Set();
+  for(const h of elmMessages(raw)){
+    if(!h.startsWith(want)) continue;
+    const bits = parseInt(h.slice(4,12),16); if(isNaN(bits)) continue;
+    const b0 = parseInt(base,16);
+    for(let i=0;i<32;i++) if(bits & (1<<(31-i))) set.add((b0+i+1).toString(16).toUpperCase().padStart(2,"0"));
+  }
+  return set;
+}
+// Mode 02 (freeze frame 00): "42 PID 00 data"
+export function parseFF(raw,pid){
+  const want=("42"+pid+"00").toUpperCase();
+  for(const h of elmMessages(raw)) if(h.startsWith(want)) return h.slice(want.length);
+  return null;
+}
+const B = (d,i)=>parseInt(d.slice(i*2,i*2+2),16);
+export const LIVE_PIDS = [
+  { pid:"0C", he:"סל\"ד", en:"RPM", unit:"rpm", f:d=>((B(d,0)*256+B(d,1))/4).toFixed(0) },
+  { pid:"0D", he:"מהירות", en:"Speed", unit:"km/h", f:d=>String(B(d,0)) },
+  { pid:"05", he:"טמפ׳ מים", en:"Coolant", unit:"°C", f:d=>String(B(d,0)-40) },
+  { pid:"42", he:"מתח מחשב", en:"ECU voltage", unit:"V", f:d=>((B(d,0)*256+B(d,1))/1000).toFixed(1) },
+  { pid:"04", he:"עומס", en:"Load", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"11", he:"מצערת", en:"Throttle", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"06", he:"STFT B1", en:"STFT B1", unit:"%", f:d=>((B(d,0)-128)*100/128).toFixed(1) },
+  { pid:"07", he:"LTFT B1", en:"LTFT B1", unit:"%", f:d=>((B(d,0)-128)*100/128).toFixed(1) },
+  { pid:"0B", he:"MAP", en:"MAP", unit:"kPa", f:d=>String(B(d,0)) },
+  { pid:"10", he:"MAF", en:"MAF", unit:"g/s", f:d=>((B(d,0)*256+B(d,1))/100).toFixed(1) },
+  { pid:"0F", he:"טמפ׳ אוויר", en:"Intake air", unit:"°C", f:d=>String(B(d,0)-40) },
+  { pid:"0E", he:"הקדמת הצתה", en:"Timing adv.", unit:"°", f:d=>(B(d,0)/2-64).toFixed(1) },
+  { pid:"5C", he:"טמפ׳ שמן", en:"Oil temp", unit:"°C", f:d=>String(B(d,0)-40) },
+  { pid:"2F", he:"מפלס דלק", en:"Fuel level", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"33", he:"לחץ ברומטרי", en:"Baro", unit:"kPa", f:d=>String(B(d,0)) },
+  { pid:"1F", he:"זמן ריצה", en:"Run time", unit:"s", f:d=>String(B(d,0)*256+B(d,1)) },
+  { pid:"A6", he:"ק\"מ (מחשב)", en:"Odometer", unit:"km", f:d=>((((B(d,0)*256+B(d,1))*256+B(d,2))*256+B(d,3))/10).toFixed(0) },
+];
+
+// ═══ Demo adapter: answers like a real ELM327 so the scanner can be tried without a car ═══
+export function makeDemoAdapter(){
+  const vin = "JTDBR32E720123456";
+  const sup = ["01","03","04","05","06","07","0B","0C","0D","0E","0F","10","11","1C","1F","20","2F","33","40","42","5C"];
+  const mask = (base) => { let m=0; for(const p of sup){ const n=parseInt(p,16)-parseInt(base,16); if(n>=1&&n<=32) m |= (1<<(32-n)); } return ("41"+base+(m>>>0).toString(16).toUpperCase().padStart(8,"0")); };
+  const hex = (n,len=2)=>Math.max(0,Math.round(n)).toString(16).toUpperCase().padStart(len,"0");
+  let t0 = Date.now(); let cleared = false;
+  const vinFrames = () => { const bytes = ["49","02","01"].concat(vin.split("").map(c=>c.charCodeAt(0).toString(16).toUpperCase())); const out=["014"]; out.push("0:"+bytes.slice(0,6).join("")); let i=6,seq=1; while(i<bytes.length){ out.push(seq+":"+bytes.slice(i,i+7).join("").padEnd(14,"0")); i+=7; seq++; } return out.join("\r"); };
+  const live = (pid) => { const s=(Date.now()-t0)/1000; const rpm=820+Math.sin(s/2)*60;
+    switch(pid){ case "0C": return hex(rpm*4,4); case "0D": return "00"; case "05": return hex(88+40); case "42": return hex(14100+Math.sin(s)*80,4);
+      case "04": return hex(22*2.55); case "11": return hex(15*2.55); case "06": return hex(128+Math.sin(s*3)*4); case "07": return hex(128+6);
+      case "0B": return hex(33); case "10": return hex(320+Math.sin(s)*20,4); case "0F": return hex(31+40); case "0E": return hex((8+64)*2); case "5C": return hex(92+40);
+      case "2F": return hex(60*2.55); case "33": return hex(101); case "1F": return hex(s+300,4); default: return null; } };
+  return {
+    demo: true, name: "DEMO", properties: { write: true },
+    respond(cmd){
+      const c = cmd.replace(/\s/g,"").toUpperCase();
+      if(c==="ATZ") return "\r\rELM327 v2.3 (DEMO)\r\r>";
+      if(c==="ATRV") return "12.6V\r\r>";
+      if(c==="ATDPN") return "A6\r\r>";
+      if(c.startsWith("AT")) return "OK\r\r>";
+      if(/^01(00|20|40|60|80|A0)$/.test(c)) { const base=c.slice(2); return (["00","20","40"].includes(base) ? mask(base) : "NO DATA")+"\r\r>"; }
+      if(c==="0101") return (cleared ? "4101000765"+"00" : "410182076504")+"\r\r>";
+      if(c==="03") return (cleared ? "4300" : "430201070300")+"\r\r>";
+      if(c==="07") return (cleared ? "4700" : "47010420")+"\r\r>";
+      if(c==="0A") return "4A00\r\r>";
+      if(c==="04") { cleared = true; return "44\r\r>"; }
+      if(c==="0902") return vinFrames()+"\r\r>";
+      if(c==="020200") return (cleared ? "NO DATA" : "4202000107")+"\r\r>";
+      if(/^02[0-9A-F]{2}00$/.test(c)) { const v = cleared ? null : live(c.slice(2,4)); return (v ? "42"+c.slice(2,4)+"00"+v : "NO DATA")+"\r\r>"; }
+      if(/^01[0-9A-F]{2}$/.test(c)) { const v = live(c.slice(2)); return (v ? "41"+c.slice(2)+v : "NO DATA")+"\r\r>"; }
+      return "?\r\r>";
+    }
+  };
+}
+export const fmtPlate = p => { const d=String(p||"").replace(/\D/g,""); if(d.length===7) return `${d.slice(0,2)}-${d.slice(2,5)}-${d.slice(5)}`; if(d.length===8) return `${d.slice(0,3)}-${d.slice(3,5)}-${d.slice(5)}`; return String(p||""); };
