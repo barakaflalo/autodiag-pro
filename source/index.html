@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+<script>/* Moved to its own address. Redirect ONLY from the old GitHub Pages address (same repo feeds both). */(function(){try{if(location.hostname==='barakaflalo.github.io'){var p=location.pathname.replace(/^\/[^\/]+/,'')||'/';location.replace('https://autodiag-pro.pages.dev'+p+location.search+location.hash);}}catch(e){}})();</script>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover"/>
+  <meta name="theme-color" content="#0F172A"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="AutoDiag Pro"/>
+  <meta name="description" content="אפליקציית אבחון רכב לחשמלאי רכב — קודי תקלה, מחשבון אבחון, סורק ELM327, חיישנים, חיווט ויומן עבודה"/>
+  <link rel="manifest" href="./manifest.json"/>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"/>
+  <link rel="icon" href="./icon-192.png" type="image/png" sizes="192x192"/>
+  <link rel="apple-touch-icon" href="./icon-192.png"/>
+  <title>AutoDiag Pro — אבחון רכב</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    html,body{background:#0F172A}
+    body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;overflow-x:hidden}
+    #root{min-height:100vh}
+    #boot{min-height:100vh;display:flex;align-items:center;justify-content:center;color:#F59E0B;font-size:18px}
+  </style>
+</head>
+<body>
+  <div id="root"><div id="boot">🔧 טוען...</div></div>
+  <noscript><p style="color:#fff;padding:20px">האפליקציה צריכה JavaScript כדי לפעול.</p></noscript>
+  <script type="module" src="/src/main.jsx"></script>
+  <script>
+    if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost' || location.hostname==='127.0.0.1')){
+      window.addEventListener('load',function(){ navigator.serviceWorker.register('./sw.js').catch(function(){}); });
+    }
+  </script>
+</body>
+</html>
