@@ -1,5 +1,10 @@
 import { useState, useRef, useEffect } from "react";
-import { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT, makeFromHe } from "./data.js";
+import { createPortal } from "react-dom";
+import { DG_SYSTEMS, dgSystemName, dgMatches, filesToPages, savePages, deletePages, loadPage, exportLibrary, importLibrary, storageInfo, fmtMB, MAX_PAGES } from "./diaglib.js";
+import { CIRCUITS } from "./circuits.js";
+import { TREES } from "./trees.js";
+import { DIN, WIRES, FUSES, PROTOCOLS, SECTIONS, E12, FUSE_STEPS } from "./techref.js";
+import { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT, makeFromHe, relatedCodes, circuitFor } from "./data.js";
 import { CODES_EN, SAFE_EN, SYMPTOMS_EN, SENSORS_EN, WIRE_TYPES_EN, WIRE_COLORS_EN, CONV_CAT_EN, BATTERY_EN } from "./data_en.js";
 import { APP_VERSION, ABOUT, ctx, L, uid, esc, loadData, saveData, deleteData, resizeImage, openExt, toast, doPrint, shareText, shareWhatsApp, elmLines, protoName, isCanProto, parsePID, parseDTCs, parseVIN, decodeReadiness, parseSupported, parseFF, LIVE_PIDS, makeDemoAdapter, fmtPlate } from "./lib.js";
 import { S, THEMES, THEME_ORDER, applyTheme } from "./theme.js";
@@ -112,6 +117,154 @@ function NotesPanel({ sKey, notes, setNotes, askConfirm, onOpenImg }){
   </Card>;
 }
 
+// ═══ Wiring-diagram viewer: pinch / drag / double-tap zoom, pages, numbered pins with notes ═══
+function DiagramViewer({ meta, onClose, onMarks, onEdit, askConfirm, backArrow }){
+  const [page,setPage] = useState(0); const [url,setUrl] = useState(""); const [err,setErr] = useState(false);
+  const [view,setView] = useState({ s:1, x:0, y:0 }); const [addMode,setAddMode] = useState(false);
+  const [draft,setDraft] = useState(null); const [sel,setSel] = useState(null); const [selText,setSelText] = useState("");
+  const box = useRef(null); const img = useRef(null); const ptrs = useRef(new Map()); const g = useRef(null); const lastTap = useRef(0);
+  const marks = meta.marks || []; const pageMarks = marks.map((m,i)=>({ ...m, i })).filter(m=>(m.p||0)===page);
+  useEffect(()=>{ let u = ""; let dead = false; setUrl(""); setErr(false); setView({ s:1, x:0, y:0 }); setSel(null); setDraft(null);
+    loadPage(meta.id, page).then(b=>{ if(dead) return; if(!b){ setErr(true); return; } u = URL.createObjectURL(b); setUrl(u); });
+    return ()=>{ dead = true; if(u) URL.revokeObjectURL(u); };
+  },[meta.id, page]);
+  function clamp(v){
+    const el = box.current, im = img.current; if(!el || !im) return v;
+    const cw = el.clientWidth, ch = el.clientHeight, iw = im.offsetWidth*v.s, ih = im.offsetHeight*v.s;
+    const s = Math.min(8, Math.max(1, v.s));
+    const x = iw <= cw ? (cw-iw)/2 : Math.min(0, Math.max(cw-iw, v.x));
+    const y = ih <= ch ? Math.max(0, Math.min((ch-ih)/2, v.y)) : Math.min(40, Math.max(ch-ih-40, v.y));
+    return { s, x, y };
+  }
+  function zoomAt(cx, cy, ns, from){ const v = from || view; const s = Math.min(8, Math.max(1, ns)); const px = (cx - v.x)/v.s, py = (cy - v.y)/v.s; return clamp({ s, x: cx - px*s, y: cy - py*s }); }
+  const rel = e => { const r = box.current.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  function down(e){
+    box.current.setPointerCapture && box.current.setPointerCapture(e.pointerId);
+    ptrs.current.set(e.pointerId, rel(e));
+    const ps = [...ptrs.current.values()];
+    if(ps.length===1) g.current = { mode:"pan", p0:ps[0], v0:view, moved:false, t0:Date.now() };
+    if(ps.length===2){ const d = Math.hypot(ps[0].x-ps[1].x, ps[0].y-ps[1].y); g.current = { mode:"pinch", d0:d||1, m0:{ x:(ps[0].x+ps[1].x)/2, y:(ps[0].y+ps[1].y)/2 }, v0:view, moved:true }; }
+  }
+  function move(e){
+    if(!ptrs.current.has(e.pointerId) || !g.current) return;
+    ptrs.current.set(e.pointerId, rel(e)); const ps = [...ptrs.current.values()]; const G = g.current;
+    if(G.mode==="pinch" && ps.length>=2){
+      const d = Math.hypot(ps[0].x-ps[1].x, ps[0].y-ps[1].y); const m = { x:(ps[0].x+ps[1].x)/2, y:(ps[0].y+ps[1].y)/2 };
+      const s = Math.min(8, Math.max(1, G.v0.s*d/G.d0)); const px = (G.m0.x-G.v0.x)/G.v0.s, py = (G.m0.y-G.v0.y)/G.v0.s;
+      setView(clamp({ s, x: m.x - px*s, y: m.y - py*s }));
+    } else if(G.mode==="pan" && ps.length===1){
+      const dx = ps[0].x-G.p0.x, dy = ps[0].y-G.p0.y; if(Math.abs(dx)+Math.abs(dy)>6) G.moved = true;
+      if(G.moved) setView(clamp({ s:G.v0.s, x:G.v0.x+dx, y:G.v0.y+dy }));
+    }
+  }
+  function up(e){
+    const G = g.current; const p = ptrs.current.get(e.pointerId); ptrs.current.delete(e.pointerId);
+    if(ptrs.current.size===1 && G && G.mode==="pinch"){ const q = [...ptrs.current.values()][0]; g.current = { mode:"pan", p0:q, v0:view, moved:true, t0:0 }; return; }
+    if(ptrs.current.size) return; g.current = null;
+    if(!G || G.mode!=="pan" || G.moved || !p || Date.now()-G.t0>350) return;
+    // a tap
+    if(addMode && img.current){ const x = (p.x-view.x)/view.s/img.current.offsetWidth, y = (p.y-view.y)/view.s/img.current.offsetHeight;
+      if(x>=0&&x<=1&&y>=0&&y<=1){ setDraft({ x, y, text:"" }); setSel(null); } return; }
+    const now = Date.now();
+    if(now-lastTap.current<320){ lastTap.current = 0; setView(view.s>1.2 ? clamp({ s:1, x:0, y:0 }) : zoomAt(p.x, p.y, 2.6)); }
+    else lastTap.current = now;
+  }
+  function wheel(e){ const p = rel(e); setView(zoomAt(p.x, p.y, view.s*(e.deltaY<0?1.2:1/1.2))); }
+  const btnZoom = f => { const el = box.current; if(!el) return; setView(zoomAt(el.clientWidth/2, el.clientHeight/2, view.s*f)); };
+  function saveDraft(){ if(!draft) return; onMarks([ ...marks, { p:page, x:draft.x, y:draft.y, text:draft.text.trim() } ]); setDraft(null); setAddMode(false); toast(T("✅ נשמר")); }
+  function saveSel(){ onMarks(marks.map((m,i)=>i===sel?{ ...m, text:selText.trim() }:m)); setSel(null); }
+  function delSel(){ const i = sel; askConfirm({ text:T("למחוק את הסימון הזה?"), ok:T("מחק"), danger:true, onOk:()=>{ onMarks(marks.filter((_,j)=>j!==i)); setSel(null); } }); }
+  const n = meta.pages||1; const bar = { background:"rgba(15,23,42,.94)", color:"#fff", display:"flex", alignItems:"center", gap:"6px", padding:"8px 10px" };
+  const vb = { background:"transparent", border:"1px solid rgba(255,255,255,.25)", color:"#fff", borderRadius:"10px", minWidth:"42px", minHeight:"40px", fontSize:"16px", cursor:"pointer", fontFamily:"inherit" };
+  const pinNo = m => pageMarks.findIndex(x=>x.i===m.i)+1;
+  return createPortal(<div dir={en()?"ltr":"rtl"} style={{ position:"fixed", inset:0, zIndex:250, background:"#0B0F17", display:"flex", flexDirection:"column", fontFamily:"'Segoe UI',Tahoma,Arial,sans-serif" }}>
+    <div style={bar}>
+      <button onClick={onClose} style={{ ...vb, padding:"0 12px", fontSize:"13px", fontWeight:700, color:S.acc }}>{backArrow} {T("סכמות")}</button>
+      <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:700, fontSize:"14px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} dir="auto">{meta.title || dgSystemName(meta.system, en())}</div><div style={{ fontSize:"11px", opacity:.7, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} dir="auto">{[meta.make, meta.model, dgYears(meta)].filter(Boolean).join(" · ")}</div></div>
+      <button onClick={onEdit} aria-label={T("עריכה")} style={vb}>✏️</button>
+    </div>
+    <div ref={box} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onWheel={wheel} style={{ flex:1, position:"relative", overflow:"hidden", touchAction:"none", cursor:addMode?"crosshair":"grab", background:"#2B2F36" }}>
+      {err && <p style={{ color:"#fff", textAlign:"center", marginTop:"40px" }}>⚠️ {T("הדף לא נמצא במכשיר")}</p>}
+      {url && <div style={{ position:"absolute", left:0, top:0, width:"100%", transformOrigin:"0 0", transform:`translate(${view.x}px,${view.y}px) scale(${view.s})` }}>
+        <img ref={img} src={url} alt="" draggable={false} onLoad={()=>setView(v=>clamp(v))} style={{ width:"100%", display:"block", userSelect:"none", background:"#fff" }}/>
+        {pageMarks.map(m=> <button key={m.i} onPointerDown={e=>e.stopPropagation()} onClick={()=>{ setSel(m.i); setSelText(m.text||""); setDraft(null); }} style={{ position:"absolute", left:`${m.x*100}%`, top:`${m.y*100}%`, transform:`translate(-50%,-50%) scale(${1/view.s})`, width:"30px", height:"30px", borderRadius:"50%", background:sel===m.i?S.acc:"#E53935", color:"#fff", border:"2px solid #fff", fontWeight:800, fontSize:"13px", boxShadow:"0 2px 6px rgba(0,0,0,.5)", cursor:"pointer", padding:0 }}>{pinNo(m)}</button>)}
+        {draft && <div style={{ position:"absolute", left:`${draft.x*100}%`, top:`${draft.y*100}%`, transform:`translate(-50%,-50%) scale(${1/view.s})`, width:"30px", height:"30px", borderRadius:"50%", background:S.acc, border:"2px solid #fff" }}/>}
+      </div>}
+      {addMode && !draft && <div style={{ position:"absolute", top:8, left:"50%", transform:"translateX(-50%)", background:S.acc, color:S.onAcc, padding:"6px 12px", borderRadius:"10px", fontSize:"12px", fontWeight:700, pointerEvents:"none" }}>📍 {T("הקש על המקום לסימון")}</div>}
+    </div>
+    {(draft || sel!==null) && <div style={{ background:S.card, padding:"10px", borderTop:`2px solid ${S.acc}` }}>
+      {draft ? <>
+        <Field value={draft.text} onChange={e=>setDraft({ ...draft, text:e.target.value })} placeholder={T("מה יש כאן? (למשל: ירוק-לבן = אות חיישן)")} aria-label={T("הערה לסימון")} autoFocus/>
+        <div style={{ display:"flex", gap:"6px", marginTop:"6px" }}><Btn onClick={saveDraft} style={{ flex:1 }}>💾 {T("שמור")}</Btn><Btn kind="ghost" onClick={()=>{ setDraft(null); }}>{T("ביטול")}</Btn></div>
+      </> : <>
+        <Field value={selText} onChange={e=>setSelText(e.target.value)} aria-label={T("הערה לסימון")} placeholder={T("הערה לסימון")}/>
+        <div style={{ display:"flex", gap:"6px", marginTop:"6px" }}><Btn onClick={saveSel} style={{ flex:1 }}>💾 {T("שמור")}</Btn><Btn kind="ghost" onClick={()=>setSel(null)}>{T("סגור")}</Btn><Btn kind="danger" onClick={delSel}>{T("מחק")}</Btn></div>
+      </>}
+    </div>}
+    <div style={{ ...bar, justifyContent:"space-between", paddingBottom:"calc(8px + env(safe-area-inset-bottom))" }}>
+      <div style={{ display:"flex", gap:"6px", alignItems:"center" }}>
+        <button style={vb} disabled={page<=0} aria-label={T("הדף הקודם")} onClick={()=>setPage(page-1)}>{en()?"‹":"›"}</button>
+        <span style={{ fontSize:"13px", minWidth:"46px", textAlign:"center" }}>{page+1}/{n}</span>
+        <button style={vb} disabled={page>=n-1} aria-label={T("הדף הבא")} onClick={()=>setPage(page+1)}>{en()?"›":"‹"}</button>
+      </div>
+      <div style={{ display:"flex", gap:"6px" }}>
+        <button style={vb} aria-label={T("הקטן")} onClick={()=>btnZoom(1/1.5)}>−</button>
+        <button style={vb} aria-label={T("הגדל")} onClick={()=>btnZoom(1.5)}>＋</button>
+        <button style={{ ...vb, background:addMode?S.acc:"transparent", color:addMode?S.onAcc:"#fff" }} aria-label={T("הוסף סימון")} onClick={()=>{ setAddMode(!addMode); setDraft(null); setSel(null); }}>📍</button>
+      </div>
+    </div>
+    {meta.notes && page===0 && !draft && sel===null && <div style={{ position:"absolute", bottom:"70px", insetInline:"10px", background:"rgba(15,23,42,.85)", color:"#fff", fontSize:"12px", padding:"6px 10px", borderRadius:"10px", pointerEvents:"none", whiteSpace:"pre-wrap" }} dir="auto">📝 {meta.notes}</div>}
+  </div>, document.body);
+}
+const dgYears = m => m.yFrom && m.yTo ? (m.yFrom===m.yTo ? String(m.yFrom) : `${m.yFrom}–${m.yTo}`) : m.yFrom ? `${m.yFrom}+` : m.yTo ? `–${m.yTo}` : "";
+
+// ═══ Add / edit a diagram (delete lives only here, with confirm) ═══
+function DiagramSheet({ init, preset, busy, onSave, onDelete, onClose, askConfirm, backArrow }){
+  const [make,setMake] = useState(init ? init.make||"" : (preset&&preset.make)||"");
+  const [model,setModel] = useState(init ? init.model||"" : (preset&&preset.model)||"");
+  const [yFrom,setYFrom] = useState(init ? (init.yFrom||"") : (preset&&preset.year)||"");
+  const [yTo,setYTo] = useState(init ? (init.yTo||"") : (preset&&preset.year)||"");
+  const [system,setSystem] = useState(init ? init.system||"other" : "engine");
+  const [title,setTitle] = useState(init ? init.title||"" : ""); const [notes,setNotes] = useState(init ? init.notes||"" : "");
+  const [files,setFiles] = useState([]); const fRef = useRef(null);
+  function pick(e){ const f = Array.from(e.target.files||[]); e.target.value=""; if(f.length) setFiles(p=>[...p, ...f]); }
+  function save(){
+    if(!make.trim()){ toast(T("נא למלא יצרן")); return; }
+    if(!init && !files.length){ toast(T("נא לבחור קובץ PDF או תמונות")); return; }
+    const yf = parseInt(yFrom)||0, yt = parseInt(yTo)||0;
+    onSave({ make:make.trim(), model:model.trim(), yFrom:yf&&yt&&yf>yt?yt:yf, yTo:yf&&yt&&yf>yt?yf:yt, system, title:title.trim(), notes:notes.trim() }, files);
+  }
+  const lab = { color:S.sub, fontSize:"12px", fontWeight:700, display:"block" };
+  return createPortal(<div dir={en()?"ltr":"rtl"} style={{ position:"fixed", inset:0, zIndex:260, background:S.bg, overflow:"auto", fontFamily:"'Segoe UI',Tahoma,Arial,sans-serif", color:S.text }}>
+    <div style={{ position:"sticky", top:0, background:S.card, borderBottom:`2px solid ${S.acc}`, padding:"8px 10px", display:"flex", alignItems:"center", gap:"8px", zIndex:2 }}>
+      <button onClick={onClose} disabled={!!busy} style={{ background:"transparent", border:`1px solid ${S.bdr}`, color:S.acc, borderRadius:"10px", padding:"8px 12px", fontSize:"13px", fontWeight:700, cursor:"pointer", fontFamily:"inherit", minHeight:"40px" }}>{backArrow} {T("סכמות")}</button>
+      <h2 style={{ fontSize:"16px", margin:0 }}>{init?T("עריכת סכמה"):T("סכמה חדשה")}</h2>
+    </div>
+    <div style={{ padding:"12px", maxWidth:"720px", margin:"0 auto", display:"flex", flexDirection:"column", gap:"10px" }}>
+      <label style={lab}>{T("יצרן")} *<Field value={make} onChange={e=>setMake(e.target.value)} list="dg-makes" placeholder="Toyota" style={{ marginTop:"4px" }}/></label>
+      <datalist id="dg-makes">{CAR_MAKES.map(m=> <option key={m} value={m}/>)}</datalist>
+      <label style={lab}>{T("דגם")}<Field value={model} onChange={e=>setModel(e.target.value)} placeholder="Corolla" style={{ marginTop:"4px" }}/></label>
+      <div style={{ display:"flex", gap:"8px" }}>
+        <label style={{ ...lab, flex:1 }}>{T("משנה")}<Field value={yFrom} onChange={e=>setYFrom(e.target.value.replace(/\D/g,"").slice(0,4))} inputMode="numeric" placeholder="2014" style={{ marginTop:"4px" }}/></label>
+        <label style={{ ...lab, flex:1 }}>{T("עד שנה")}<Field value={yTo} onChange={e=>setYTo(e.target.value.replace(/\D/g,"").slice(0,4))} inputMode="numeric" placeholder="2018" style={{ marginTop:"4px" }}/></label>
+      </div>
+      <label style={lab}>{T("מערכת")}<Select value={system} onChange={e=>setSystem(e.target.value)} label={T("מערכת")} style={{ marginTop:"4px" }}>{DG_SYSTEMS.map(s=> <option key={s[0]} value={s[0]}>{en()?s[2]:s[1]}</option>)}</Select></label>
+      <label style={lab}>{T("כותרת (לא חובה)")}<Field value={title} onChange={e=>setTitle(e.target.value)} placeholder={T("למשל: מחשב מנוע 1ZR — מחברים A ו-B")} style={{ marginTop:"4px" }}/></label>
+      <label style={lab}>{T("הערות")}<Field area rows={3} value={notes} onChange={e=>setNotes(e.target.value)} placeholder={T("מקור הסכמה, טיפים, מה בדקת...")} style={{ marginTop:"4px" }}/></label>
+      <input ref={fRef} type="file" accept="application/pdf,image/*" multiple onChange={pick} style={{ display:"none" }}/>
+      <Btn kind="ghost" onClick={()=>fRef.current?.click()} disabled={!!busy}>📎 {init?T("הוסף דפים (PDF או תמונות)"):T("בחר PDF או תמונות")}</Btn>
+      {files.length>0 && <div style={{ background:S.inner, borderRadius:"10px", padding:"8px 10px" }}>{files.map((f,i)=> <div key={i} style={{ display:"flex", alignItems:"center", gap:"6px", fontSize:"12px", color:S.sub }}><span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} dir="auto">{/pdf/i.test(f.type)||/\.pdf$/i.test(f.name)?"📄":"🖼️"} {f.name}</span><span>{fmtMB(f.size)}</span><IconBtn label={T("הסר")} onClick={()=>setFiles(files.filter((_,j)=>j!==i))}>✕</IconBtn></div>)}</div>}
+      {init && <p style={{ color:S.muted, fontSize:"12px", margin:0 }}>{T("בסכמה יש {n} דפים",{ n:init.pages||0 })}</p>}
+      <p style={{ color:S.muted, fontSize:"11px", margin:0 }}>{T("PDF נשמר כתמונות של כל דף, כך שהוא נפתח גם בלי אינטרנט. עד {n} דפים לסכמה.",{ n:MAX_PAGES })}</p>
+      {busy && <p style={{ color:S.acc, fontWeight:700, fontSize:"13px", margin:0 }}>⏳ {busy}</p>}
+      <div style={{ display:"flex", gap:"8px" }}>
+        <Btn kind="green" onClick={save} disabled={!!busy} style={{ flex:2, fontSize:"15px" }}>💾 {T("שמור")}</Btn>
+        {init && <Btn kind="danger" disabled={!!busy} onClick={()=>askConfirm({ text:T("למחוק את הסכמה וכל הדפים שלה?"), ok:T("מחק"), danger:true, onOk:onDelete })}>🗑️ {T("מחק")}</Btn>}
+      </div>
+    </div>
+  </div>, document.body);
+}
+
 // ═══ MAIN APP ═══
 export default function App(){
   // navigation
@@ -158,6 +311,14 @@ export default function App(){
   const [vehicle,setVehicle] = useState(null); const [vehicles,setVehicles] = useState([]);
   const [plateIn,setPlateIn] = useState(""); const [plateBusy,setPlateBusy] = useState(false); const [plateMsg,setPlateMsg] = useState("");
   const [wlVeh,setWlVeh] = useState(null);
+  // wiring-diagram library
+  const [diagrams,setDiagrams] = useState([]); const [dgSheet,setDgSheet] = useState(null); const [dgView,setDgView] = useState(null);
+  const [dgBusy,setDgBusy] = useState(""); const [dgQuery,setDgQuery] = useState(""); const [dgOnlyVeh,setDgOnlyVeh] = useState(false); const [dgStore,setDgStore] = useState(null);
+  const dgImpRef = useRef(null); const [circOpen,setCircOpen] = useState("");
+  // troubleshooting trees + calculators
+  const [treeSel,setTreeSel] = useState(null); // { id, path:[nodeId] }
+  const [cv,setCv] = useState({ vdL:"3", vdA:"1.5", vdI:"10", ledV:"14.4", ledF:"2.0", ledI:"20", drI:"60", drAh:"60", pwW:"120", pwV:"12" });
+  const setC = (k,v) => setCv(p=>({ ...p, [k]:v }));
   // refs
   const rRef = useRef(null); const wlFRef = useRef(null); const importRef = useRef(null); const topRef = useRef(null);
   const hist = useRef({ guard:false }); const exitArm = useRef(false); const backRef = useRef(()=>{}); const pressT = useRef(null);
@@ -169,14 +330,15 @@ export default function App(){
 
   // ─── load ───
   useEffect(()=>{ (async()=>{
-    const [n,f,h,w,st,vh,vhs] = await Promise.all([loadData("adp_notes",{}),loadData("adp_favs",[]),loadData("adp_history",[]),loadData("adp_worklog",[]),loadData("adp_settings",DEFAULT_SETTINGS),loadData("adp_vehicle",null),loadData("adp_vehicles",[])]);
+    const [n,f,h,w,st,vh,vhs,dgs] = await Promise.all([loadData("adp_notes",{}),loadData("adp_favs",[]),loadData("adp_history",[]),loadData("adp_worklog",[]),loadData("adp_settings",DEFAULT_SETTINGS),loadData("adp_vehicle",null),loadData("adp_vehicles",[]),loadData("adp_diagrams",[])]);
     const s2 = { ...DEFAULT_SETTINGS, ...st };
-    setNotes(n); setFavs(f); setHistory(h); setWorkLog(w); setSettings(s2); setVehicle(vh); setVehicles(vhs||[]); setLoaded(true);
+    setNotes(n); setFavs(f); setHistory(h); setWorkLog(w); setSettings(s2); setVehicle(vh); setVehicles(vhs||[]); setDiagrams(dgs||[]); setLoaded(true);
     if(!s2.guideDone) setGuideStep(0);
   })(); },[]);
   useEffect(()=>{ if(loaded) saveData("adp_notes",notes); },[notes,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_vehicle",vehicle); },[vehicle,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_vehicles",vehicles); },[vehicles,loaded]);
+  useEffect(()=>{ if(loaded) saveData("adp_diagrams",diagrams); },[diagrams,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_favs",favs); },[favs,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_history",history); },[history,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_worklog",workLog); },[workLog,loaded]);
@@ -196,6 +358,7 @@ export default function App(){
   useEffect(()=>{ if((codeResult||notFound)&&rRef.current) rRef.current.scrollIntoView({ behavior:"smooth", block:"start" }); },[codeResult,notFound]);
   useEffect(()=>{ if(!timerOn) return; const iv=setInterval(()=>setTimerElapsed(Date.now()-timerStart),1000); return ()=>clearInterval(iv); },[timerOn,timerStart]);
   useEffect(()=>{ try{ window.scrollTo(0,0); }catch(e){} },[tab,sub]);
+  useEffect(()=>{ if(sub && sub.id==="circuits" && circOpen){ const t = setTimeout(()=>{ const el = document.getElementById("circ-"+circOpen); if(el) el.scrollIntoView({ behavior:"smooth", block:"start" }); },120); return ()=>clearTimeout(t); } },[sub]);
 
   // ─── phone back button (AppNest mandatory requirement 1) ───
   // One "guard" history entry always exists, except during the 2-second exit window.
@@ -208,9 +371,12 @@ export default function App(){
     if(confirmBox){ setConfirmBox(null); return; }
     if(imgView){ setImgView(null); return; }
     if(guideStep>=0){ finishGuide(); return; }
+    if(dgSheet){ if(!dgBusy) setDgSheet(null); return; }
+    if(dgView){ setDgView(null); return; }
     if(wlSheet){ closeSheet(); return; }
     if(showHist){ setShowHist(false); return; }
-    if(sub){ setTab(sub.from); setSub(null); return; }
+    if(sub && sub.id==="trees" && treeSel){ if(treeSel.path.length>1) setTreeSel({ ...treeSel, path:treeSel.path.slice(0,-1) }); else setTreeSel(null); return; }
+    if(sub){ backSub(); return; }
     if(tab!=="home"){ setTab("home"); return; }
     exitArm.current = true;
     toast(T("לחץ שוב כדי לצאת"));
@@ -226,8 +392,9 @@ export default function App(){
 
   // ─── navigation helpers ───
   function goTab(t){ if(t===tab && !sub){ try{ window.scrollTo({ top:0, behavior:"smooth" }); }catch(e){} return; } setSub(null); setTab(t); }
-  function openSub(id){ setSub({ id, from: sub ? sub.from : tab }); }
-  const SUB_TITLES = { obd:"מיקום שקע OBD", diag:"מחשבון אבחון", sensors:"חיישנים ומצבר", wires:"חיווט", convert:"ממיר ומחשבון אוהם", all:"מאגר קודים", settings:"הגדרות", about:"אודות" };
+  function openSub(id){ if(sub && sub.id===id) return; setSub({ id, from: sub ? sub.from : tab, prev: sub || null }); }
+  function backSub(){ if(sub && sub.prev) setSub(sub.prev); else { setTab(sub ? sub.from : "home"); setSub(null); } }
+  const SUB_TITLES = { obd:"מיקום שקע OBD", diag:"מחשבון אבחון", sensors:"חיישנים ומצבר", wires:"חיווט", convert:"ממיר ומחשבון אוהם", all:"מאגר קודים", settings:"הגדרות", about:"אודות", lib:"הסכמות שלי", circuits:"סכמות טיפוסיות", trees:"עצי אבחון", ref:"מידע טכני", calc:"מחשבונים" };
   const TAB_NAMES = { home:"בית", code:"קוד", scan:"סורק", log:"יומן", more:"עוד" };
   const setS = patch => setSettings(p=>({ ...p, ...patch }));
   const askConfirm = c => setConfirmBox(c);
@@ -294,8 +461,9 @@ export default function App(){
   }
   function deleteAll(){
     askConfirm({ text:T("למחוק את כל הנתונים? (יומן, הערות, תמונות, מועדפים, היסטוריה)"), ok:T("המשך"), danger:true, onOk:()=>setTimeout(()=>askConfirm({ text:T("בטוח? הפעולה לא ניתנת לביטול. מומלץ לגבות קודם."), ok:T("מחק הכל"), danger:true, onOk:async()=>{
-      await Promise.all(["adp_notes","adp_favs","adp_history","adp_worklog","adp_vehicle","adp_vehicles"].map(deleteData));
-      setNotes({}); setFavs([]); setHistory([]); setWorkLog([]); setVehicle(null); setVehicles([]); toast(T("כל הנתונים נמחקו"));
+      await Promise.all(["adp_notes","adp_favs","adp_history","adp_worklog","adp_vehicle","adp_vehicles","adp_diagrams"].map(deleteData));
+      for(const m of diagrams) await deletePages(m.id, m.pages||0);
+      setNotes({}); setFavs([]); setHistory([]); setWorkLog([]); setVehicle(null); setVehicles([]); setDiagrams([]); toast(T("כל הנתונים נמחקו"));
     } }),50) });
   }
   function shareApp(){
@@ -515,6 +683,46 @@ export default function App(){
     setTab("log"); openSheet(null, all, v, lines.join("\n"));
   }
 
+  // ─── wiring-diagram library ───
+  const dgVeh = () => vehicle ? { make:vehMake(vehicle), model:vehicle.model||"", year:vehicle.year||"" } : null;
+  const dgForVeh = v => v ? diagrams.filter(m=>dgMatches(m, vehMake(v), v.model, v.year)) : [];
+  function refreshStore(){ storageInfo().then(setDgStore); }
+  async function saveDiagram(fields, files){
+    const isNew = !dgSheet.meta; const old = dgSheet.meta;
+    try{
+      let pages = [], thumb = "", cut = false;
+      if(files.length){ setDgBusy(T("מכין דפים...")); const r = await filesToPages(files, (d,t)=>setDgBusy(T("מכין דף {d} מתוך {t}",{ d, t }))); pages = r.pages; thumb = r.thumb; cut = r.cut; }
+      if(isNew && !pages.length){ toast(T("לא נמצאו דפים בקבצים שנבחרו")); return; }
+      const id = isNew ? uid() : old.id; const start = isNew ? 0 : (old.pages||0);
+      const room = Math.max(0, MAX_PAGES - start); if(pages.length > room){ pages = pages.slice(0, room); cut = true; }
+      if(pages.length){ setDgBusy(T("שומר...")); await savePages(id, pages, start); }
+      const meta = isNew ? { id, ...fields, pages:pages.length, thumb, marks:[], at:new Date().toISOString() } : { ...old, ...fields, pages:start+pages.length, thumb: old.thumb || thumb };
+      setDiagrams(p => isNew ? [meta, ...p] : p.map(m=>m.id===id?meta:m));
+      if(dgView && dgView.id===id) setDgView(meta);
+      setDgSheet(null); toast(cut ? T("נשמרו רק {n} הדפים הראשונים",{ n:MAX_PAGES }) : T("✅ נשמר")); refreshStore();
+    }catch(e){ toast(String(e&&e.message)==="no-idb" ? T("המכשיר לא מאפשר לשמור קבצים גדולים") : T("לא הצלחתי לקרוא את הקובץ. נסה PDF אחר או תמונות.")); }
+    finally{ setDgBusy(""); }
+  }
+  async function deleteDiagram(){
+    const m = dgSheet && dgSheet.meta; if(!m) return;
+    await deletePages(m.id, m.pages||0); setDiagrams(p=>p.filter(x=>x.id!==m.id)); setDgSheet(null); setDgView(null); toast(T("נמחק")); refreshStore();
+  }
+  const setMarks = (id, marks) => { setDiagrams(p=>p.map(m=>m.id===id?{ ...m, marks }:m)); setDgView(v=>v&&v.id===id?{ ...v, marks }:v); };
+  async function dgExport(){
+    if(!diagrams.length) return;
+    try{ setDgBusy(T("מכין קובץ...")); const b = await exportLibrary(diagrams, (d,t)=>setDgBusy(T("מכין דף {d} מתוך {t}",{ d, t })));
+      const url = URL.createObjectURL(b); const a = document.createElement("a"); a.href=url; a.download=`autodiag-diagrams-${new Date().toISOString().slice(0,10)}.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),4000);
+      toast(T("✅ קובץ הגיבוי נוצר"));
+    }catch(e){ toast(T("ההורדה נכשלה")); } finally{ setDgBusy(""); }
+  }
+  async function dgImport(e){
+    const f = e.target.files?.[0]; e.target.value=""; if(!f) return;
+    try{ setDgBusy(T("משחזר...")); const added = await importLibrary(f, diagrams, uid, (d,t)=>setDgBusy(T("משחזר דף {d} מתוך {t}",{ d, t })));
+      setDiagrams(p=>[...added, ...p]); toast(T("נוספו {n} סכמות",{ n:added.length })); refreshStore();
+    }catch(err){ toast(T("❌ הקובץ אינו גיבוי סכמות של AutoDiag Pro")); } finally{ setDgBusy(""); }
+  }
+  function openLib(onlyVeh){ setDgOnlyVeh(!!onlyVeh); setDgQuery(""); refreshStore(); openSub("lib"); }
+
   // ─── derived ───
   const actualMake = make==="__custom__" ? makeCustom : make;
   const modelsList = make && make!=="__custom__" ? (CAR_MODELS[make]||[]) : [];
@@ -533,9 +741,9 @@ export default function App(){
 
   function Header(){
     if(sub){
-      const fromName = T(TAB_NAMES[sub.from]||"בית");
+      const fromName = sub.prev ? T(SUB_TITLES[sub.prev.id]||"") : T(TAB_NAMES[sub.from]||"בית");
       return <div style={{ position:"sticky", top:0, zIndex:50, background:S.card, borderBottom:`2px solid ${S.acc}`, padding:"8px 10px", display:"flex", alignItems:"center", gap:"8px" }}>
-        <button onClick={()=>{ setTab(sub.from); setSub(null); }} style={{ background:"transparent", border:`1px solid ${S.bdr}`, color:S.acc, borderRadius:"10px", padding:"8px 12px", fontSize:"13px", fontWeight:700, cursor:"pointer", fontFamily:"inherit", minHeight:"40px", whiteSpace:"nowrap" }}>{backArrow} {fromName}</button>
+        <button onClick={backSub} style={{ background:"transparent", border:`1px solid ${S.bdr}`, color:S.acc, borderRadius:"10px", padding:"8px 12px", fontSize:"13px", fontWeight:700, cursor:"pointer", fontFamily:"inherit", minHeight:"40px", whiteSpace:"nowrap" }}>{backArrow} {fromName}</button>
         <h1 style={{ fontSize:"16px", fontWeight:800, color:S.text, margin:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{T(SUB_TITLES[sub.id]||"")}</h1>
       </div>;
     }
@@ -576,10 +784,11 @@ export default function App(){
       </div>}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"6px" }}>
         <Btn kind="ghost" onClick={()=>vehToObd(v)}>🔌 {T("מיקום OBD")}</Btn>
-        <Btn kind="ghost" onClick={()=>vehToWires(v)}>📐 {T("סכמות חשמל")}</Btn>
+        <Btn kind="ghost" onClick={()=>openLib(true)}>📐 {T("סכמות חשמל")}{dgForVeh(v).length?` (${dgForVeh(v).length})`:""}</Btn>
         <Btn kind="ghost" onClick={()=>{ setTab("log"); openSheet(null,[],v); }}>📋 {T("רשומת יומן")}</Btn>
         <Btn kind="ghost" onClick={()=>goTab("scan")}>🔗 {T("סרוק את הרכב")}</Btn>
       </div>
+      {!compact && vehMake(v) && <details style={{ marginTop:"10px" }}><summary style={{ color:S.acc, fontSize:"13px", fontWeight:700, cursor:"pointer" }}>📝 {T("ידע על הדגם")} — {vehMake(v)} {v.model}{(notes[`m_${vehMake(v)}_${v.model||""}`]||[]).length?` (${notes[`m_${vehMake(v)}_${v.model||""}`].length})`:""}</summary><p style={{ color:S.muted, fontSize:"12px", margin:"6px 0" }}>{T("טיפים שצברת על הדגם הזה — מקום ההארקה, איפה המחשבים, תקלות שחוזרות. יופיע בכל רכב מאותו דגם.")}</p><NotesPanel sKey={`m_${vehMake(v)}_${v.model||""}`} notes={notes} setNotes={setNotes} askConfirm={askConfirm} onOpenImg={setImgView}/></details>}
       <details style={{ marginTop:"10px" }}><summary style={{ color:S.muted, fontSize:"12px", cursor:"pointer" }}>{T("רכב אחר")}</summary><div style={{ marginTop:"8px" }}>{plateBox}</div></details>
     </Card>;
   }
@@ -596,7 +805,9 @@ export default function App(){
     const tiles = [
       ["⚠️","קוד תקלה",()=>goTab("code")],["🔗","סורק OBD",()=>goTab("scan")],["📋","יומן עבודה",()=>goTab("log")],
       ["🔌","מיקום שקע OBD",()=>openSub("obd")],["🩺","מחשבון אבחון",()=>openSub("diag")],["📊","חיישנים ומצבר",()=>openSub("sensors")],
-      ["🧵","חיווט",()=>openSub("wires")],["🔄","ממיר ואוהם",()=>openSub("convert")],["📚","מאגר קודים",()=>openSub("all")],
+      ["🧵","חיווט",()=>openSub("wires")],["📐","סכמות חשמל",()=>openLib(false)],["📘","סכמות טיפוסיות",()=>openSub("circuits")],
+      ["🧭","עצי אבחון",()=>{ setTreeSel(null); openSub("trees"); }],["📖","מידע טכני",()=>openSub("ref")],["🧮","מחשבונים",()=>openSub("calc")],
+      ["🔄","ממיר ואוהם",()=>openSub("convert")],["📚","מאגר קודים",()=>openSub("all")],
     ];
     const recent = history.slice().reverse().slice(0,8).map(h=>h.code);
     return <>
@@ -608,7 +819,7 @@ export default function App(){
         {res && <div style={{ marginTop:"8px" }}>
           {res.codes.map(c=> <button key={c} onClick={()=>{ searchCode(c); setHomeQuery(""); }} style={rowBtn()}><span style={{ color:S.acc, fontWeight:700, fontFamily:"monospace", minWidth:"58px" }}>{c}</span><span style={{ color:S.sub, fontSize:"12px", flex:1 }}>{codeTitle(c)}</span></button>)}
           {res.logs.map(w=> <button key={w.id} onClick={()=>{ setHomeQuery(""); setTab("log"); openSheet(w); }} style={rowBtn()}><span>📋</span><span style={{ color:S.text, fontWeight:700 }}>{w.plate}</span><span style={{ color:S.muted, fontSize:"12px", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{w.desc}</span></button>)}
-          {res.nts.map(({ k,n })=> <button key={n.id} onClick={()=>{ setHomeQuery(""); if(k.startsWith("c_")) searchCode(k.slice(2)); }} style={rowBtn()}><span>📝</span><span style={{ color:S.acc, fontFamily:"monospace" }}>{k.replace(/^c_|^obd_/,"")}</span><span style={{ color:S.sub, fontSize:"12px", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{n.text}</span></button>)}
+          {res.nts.map(({ k,n })=> <button key={n.id} onClick={()=>{ setHomeQuery(""); if(k.startsWith("c_")) searchCode(k.slice(2)); }} style={rowBtn()}><span>📝</span><span style={{ color:S.acc, fontFamily:"monospace" }}>{k.replace(/^c_|^obd_|^m_/,"").replace(/_/g," ")}</span><span style={{ color:S.sub, fontSize:"12px", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{n.text}</span></button>)}
           {!res.codes.length&&!res.logs.length&&!res.nts.length && <p style={{ color:S.muted, fontSize:"12px", textAlign:"center", padding:"8px" }}>{T("לא נמצאו תוצאות")}</p>}
         </div>}
       </Card>
@@ -649,6 +860,8 @@ export default function App(){
           <h3 style={h3()}>🔍 {T("גורמים")}</h3>{ci.causes.map((c,i)=> <div key={i} style={li()}><span style={{ color:S.acc }}>•</span><span>{c}</span></div>)}
           <h3 style={h3()}>🛠️ {T("שלבי בדיקה")}</h3>{ci.steps.map((s,i)=> <div key={i} style={li()}><span style={{ color:S.acc, fontWeight:700, minWidth:"18px" }}>{i+1}.</span><span>{s}</span></div>)}
           <h3 style={h3()}>📍 {T("מיקום")}</h3><div style={{ background:S.inner, borderRadius:"10px", padding:"10px" }}><p style={{ color:S.sub, fontSize:"13px", lineHeight:1.6, margin:0 }}>{ci.location}</p></div>
+          {circuitFor(ci.code) && (()=>{ const cc = CIRCUITS.find(x=>x.id===circuitFor(ci.code)); return cc ? <div style={{ marginTop:"10px" }}><Btn kind="blue" onClick={()=>{ setCircOpen(cc.id); openSub("circuits"); }} style={{ width:"100%" }}>📘 {T("סכמה טיפוסית")}: {en()?cc.en.title:cc.he.title}</Btn></div> : null; })()}
+          {relatedCodes(ci.code).length>0 && <><h3 style={h3()}>🔗 {T("קודים קשורים")}</h3><div style={{ display:"flex", flexWrap:"wrap", gap:"5px" }}>{relatedCodes(ci.code).map(r=> <button key={r} onClick={()=>searchCode(r)} title={codeTitle(r)} style={{ background:S.inner, border:`1px solid ${S.bdr}`, borderRadius:"8px", padding:"5px 8px", cursor:"pointer", fontFamily:"inherit", textAlign:"start", maxWidth:"100%" }}><span style={{ color:S.acc, fontFamily:"monospace", fontWeight:700, fontSize:"12px" }}>{r}</span> <span style={{ color:S.muted, fontSize:"11px" }}>{codeTitle(r).replace(/^.*? — /,"").slice(0,28)}</span></button>)}</div></>}
           <div style={{ marginTop:"10px" }}><Btn kind="ghost" onClick={()=>{ setTab("log"); openSheet(null,[ci.code]); }} style={{ width:"100%" }}>📋 {T("פתח רשומת יומן עם הקוד הזה")}</Btn></div>
         </Card>
         <Card title={"🔗 "+T("קישורים")}><div style={{ display:"flex", flexWrap:"wrap", gap:"6px" }}><YT q={`${ci.code} diagnosis fix`} l={T("תיקון {c}",{ c:ci.code })}/><YT q={`${ci.code} explained`} l={T("הסבר")}/><GG q={`${ci.code} sensor location`} l={T("תמונות")} img/><GG q={`${ci.code} repair guide`} l={T("מדריך")}/></div></Card>
@@ -765,7 +978,9 @@ export default function App(){
   function MoreTab(){
     const items = [
       ["🔌","מיקום שקע OBD",()=>openSub("obd")],["🩺","מחשבון אבחון",()=>openSub("diag")],["📊","חיישנים ומצבר",()=>openSub("sensors")],
-      ["🧵","חיווט",()=>openSub("wires")],["🔄","ממיר ומחשבון אוהם",()=>openSub("convert")],["📚","מאגר קודים",()=>openSub("all")],
+      ["🧵","חיווט",()=>openSub("wires")],["📐","סכמות חשמל",()=>openLib(false)],["📘","סכמות טיפוסיות",()=>openSub("circuits")],
+      ["🧭","עצי אבחון",()=>{ setTreeSel(null); openSub("trees"); }],["📖","מידע טכני",()=>openSub("ref")],["🧮","מחשבונים",()=>openSub("calc")],
+      ["🔄","ממיר ומחשבון אוהם",()=>openSub("convert")],["📚","מאגר קודים",()=>openSub("all")],
       ["⚙️","הגדרות",()=>openSub("settings")],["💾","גיבוי לקובץ",doExport],["📂","שחזור מגיבוי",()=>importRef.current?.click()],
       ["📖","מדריך פתיחה",()=>setGuideStep(0)],["ℹ️","אודות",()=>openSub("about")],["🔒","מדיניות פרטיות",()=>openExt("./privacy_policy.html")],
     ];
@@ -845,6 +1060,10 @@ export default function App(){
 
   function WiresScreen(){
     return <>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"10px" }}>
+        <Btn onClick={()=>openLib(false)} style={{ minHeight:"60px" }}>📐 {T("הסכמות שלי")}{diagrams.length?` (${diagrams.length})`:""}</Btn>
+        <Btn kind="blue" onClick={()=>openSub("circuits")} style={{ minHeight:"60px" }}>📘 {T("סכמות טיפוסיות")}</Btn>
+      </div>
       <Card title={"🎨 "+T("צבעי חיווט לפי יצרן")}>
         <Select label={T("יצרן")} value={wireMake} onChange={e=>setWireMake(e.target.value)} style={{ marginBottom:"8px" }}>{Object.keys(WIRE_COLORS).map(k=> <option key={k} value={k}>{wireBrandLabel(k)}</option>)}</Select>
         {(WIRE_COLORS[wireMake]||[]).map((w0,i)=>{ const w = wireColorOf(wireMake,i,w0); return <div key={i} style={{ display:"flex", alignItems:"center", gap:"10px", padding:"8px", background:S.inner, borderRadius:"10px", marginBottom:"4px" }}><div style={{ width:"24px", height:"24px", borderRadius:"50%", background:w.c, border:"2px solid #777", flexShrink:0 }}/><div><span style={{ color:S.text, fontSize:"13px", fontWeight:700 }}>{w.n}</span><span style={{ color:S.muted, fontSize:"12px" }}> — {w.u}</span></div></div>; })}
@@ -859,6 +1078,145 @@ export default function App(){
     </>;
   }
 
+  function LibScreen(){
+    const v = vehicle; const ql = dgQuery.trim().toLowerCase();
+    let list = dgOnlyVeh && v ? dgForVeh(v) : diagrams;
+    if(ql) list = list.filter(m=>[m.make, m.model, m.title, m.notes, dgSystemName(m.system,false), dgSystemName(m.system,true), String(m.yFrom||""), ...(m.marks||[]).map(x=>x.text)].join(" ").toLowerCase().includes(ql));
+    const groups = {}; list.forEach(m=>{ const k = m.make||"?"; (groups[k] = groups[k]||[]).push(m); });
+    const keys = Object.keys(groups).sort((a,b)=>a.localeCompare(b));
+    return <>
+      <Btn onClick={()=>setDgSheet({ meta:null })} style={{ width:"100%", marginBottom:"10px", fontSize:"15px" }}>＋ {T("הוסף סכמה (PDF או תמונה)")}</Btn>
+      {diagrams.length>0 && <Card>
+        <Field value={dgQuery} onChange={e=>setDgQuery(e.target.value)} placeholder={T("חפש יצרן, דגם, מערכת או הערה...")} aria-label={T("חיפוש סכמות")}/>
+        {v && <div style={{ display:"flex", gap:"6px", marginTop:"8px", flexWrap:"wrap" }}><Chip active={!dgOnlyVeh} onClick={()=>setDgOnlyVeh(false)}>{T("הכל")} ({diagrams.length})</Chip><Chip active={dgOnlyVeh} onClick={()=>setDgOnlyVeh(true)}>🚗 {vehLabel(v)} ({dgForVeh(v).length})</Chip></div>}
+      </Card>}
+      {keys.map(k=> <Card key={k} title={<span dir="auto">🚗 {k} <span style={{ color:S.muted, fontWeight:500 }}>({groups[k].length})</span></span>}>
+        {groups[k].sort((a,b)=>(a.model||"").localeCompare(b.model||"")||(a.system||"").localeCompare(b.system||"")).map(m=> <div key={m.id} style={{ display:"flex", alignItems:"center", gap:"10px", padding:"7px 0", borderBottom:`1px solid ${S.bdr}` }}>
+          <button onClick={()=>setDgView(m)} style={{ display:"flex", alignItems:"center", gap:"10px", flex:1, minWidth:0, background:"none", border:"none", padding:0, cursor:"pointer", fontFamily:"inherit", textAlign:"start" }}>
+            {m.thumb ? <img src={m.thumb} alt="" style={{ width:"58px", height:"58px", objectFit:"cover", objectPosition:"top", borderRadius:"8px", background:"#fff", flexShrink:0 }}/> : <span style={{ width:"58px", height:"58px", borderRadius:"8px", background:S.inner, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px", flexShrink:0 }}>📐</span>}
+            <span style={{ minWidth:0 }}>
+              <span style={{ display:"block", color:S.text, fontWeight:700, fontSize:"14px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} dir="auto">{m.title || dgSystemName(m.system, en())}</span>
+              <span style={{ display:"block", color:S.sub, fontSize:"12px" }} dir="auto">{[m.model, dgYears(m)].filter(Boolean).join(" · ") || T("כל הדגמים")}</span>
+              <span style={{ display:"block", color:S.muted, fontSize:"11px" }}>{m.title ? dgSystemName(m.system, en())+" · " : ""}{T("{n} דפים",{ n:m.pages||0 })}{(m.marks||[]).length?` · 📍${m.marks.length}`:""}</span>
+            </span>
+          </button>
+          <IconBtn label={T("עריכה")} onClick={()=>setDgSheet({ meta:m })} color={S.acc}>✏️</IconBtn>
+        </div>)}
+      </Card>)}
+      {diagrams.length===0 && <Card><div style={{ textAlign:"center", padding:"10px", color:S.sub, fontSize:"13px", lineHeight:1.7 }}>
+        <div style={{ fontSize:"40px" }}>📐</div>
+        <p>{T("כאן נשמרות סכמות החשמל שלך — PDF או תמונות — לפי יצרן, דגם, שנה ומערכת.")}</p>
+        <p>{T("הכל נשמר בטלפון ונפתח גם בלי אינטרנט. אפשר להגדיל, לעבור בין דפים ולסמן נקודות עם הערות.")}</p>
+        <p style={{ color:S.muted, fontSize:"12px" }}>{T("כשתחפש רכב לפי מספר רישוי, הסכמות שלו יופיעו בכרטיס הרכב.")}</p>
+      </div></Card>}
+      {diagrams.length>0 && list.length===0 && <Card><p style={{ color:S.muted, fontSize:"13px", textAlign:"center" }}>{T("לא נמצאו סכמות")}</p></Card>}
+      <Card title={"💾 "+T("גיבוי הסכמות")}>
+        <p style={{ color:S.muted, fontSize:"12px", margin:"0 0 8px" }}>{T("הסכמות לא נכללות בגיבוי הרגיל כי הן כבדות. כאן אפשר לשמור את כולן לקובץ אחד ולשחזר בטלפון אחר.")}{dgStore&&dgStore.used?` ${T("בשימוש: {u}",{ u:fmtMB(dgStore.used) })}`:""}</p>
+        <input ref={dgImpRef} type="file" accept="application/json,.json" onChange={dgImport} style={{ display:"none" }}/>
+        <div style={{ display:"flex", gap:"8px" }}><Btn kind="ghost" disabled={!diagrams.length||!!dgBusy} onClick={dgExport} style={{ flex:1 }}>💾 {T("ייצוא לקובץ")}</Btn><Btn kind="ghost" disabled={!!dgBusy} onClick={()=>dgImpRef.current?.click()} style={{ flex:1 }}>📂 {T("ייבוא מקובץ")}</Btn></div>
+        {dgBusy && !dgSheet && <p style={{ color:S.acc, fontWeight:700, fontSize:"13px", margin:"8px 0 0" }}>⏳ {dgBusy}</p>}
+      </Card>
+      <Btn kind="blue" onClick={()=>openSub("circuits")} style={{ width:"100%" }}>📘 {T("סכמות טיפוסיות — מעגלים נפוצים עם נקודות בדיקה")}</Btn>
+    </>;
+  }
+  function CircuitsScreen(){
+    return <>
+      <Card><p style={{ color:S.sub, fontSize:"13px", margin:0, lineHeight:1.6 }}>{T("סכמות כלליות של מעגלים נפוצים ברכב, עם ערכים ונקודות בדיקה. הן עוזרות להבין ולאבחן — אבל הן לא סכמת יצרן של דגם מסוים. צבעי חוטים ומספרי פינים משתנים בין רכבים.")}</p></Card>
+      {CIRCUITS.map(cc=>{ const x = en() ? cc.en : cc.he; return <details key={cc.id} id={"circ-"+cc.id} open={circOpen===cc.id} onToggle={e=>{ if(e.currentTarget.open && circOpen!==cc.id) setCircOpen(cc.id); }} style={{ background:S.card, borderRadius:"14px", border:`1px solid ${S.bdr}`, marginBottom:"8px", overflow:"hidden" }}>
+        <summary style={{ padding:"13px 14px", cursor:"pointer", color:S.acc, fontWeight:700, fontSize:"14px", listStyle:"none", display:"flex", alignItems:"center", gap:"8px" }}><span style={{ fontSize:"20px" }}>{cc.icon}</span><span style={{ flex:1 }}>{x.title}</span><span style={{ color:S.muted }}>▾</span></summary>
+        <div style={{ padding:"0 14px 14px" }}>
+          <div dir="ltr" style={{ background:S.inner, borderRadius:"12px", padding:"8px", color:S.text, marginBottom:"10px" }} dangerouslySetInnerHTML={{ __html: cc.draw() }}/>
+          <p style={{ color:S.sub, fontSize:"13px", lineHeight:1.6, margin:"0 0 8px" }}>{x.desc}</p>
+          <div style={{ color:S.acc, fontSize:"13px", fontWeight:700, marginBottom:"4px" }}>🔍 {T("מה לבדוק")}</div>
+          {x.tests.map((s,i)=> <p key={i} style={{ color:S.text, fontSize:"13px", lineHeight:1.55, margin:"0 0 5px", paddingInlineStart:"14px", position:"relative" }}><span style={{ position:"absolute", insetInlineStart:0, color:S.acc }}>•</span>{s}</p>)}
+        </div>
+      </details>; })}
+    </>;
+  }
+  function TreesScreen(){
+    const L2 = o => en() ? o.en : o.he;
+    if(!treeSel) return <>
+      <Card><p style={{ color:S.sub, fontSize:"13px", margin:0, lineHeight:1.6 }}>{T("בחר תקלה, ענה על השאלות לפי מה שאתה מודד — והאפליקציה תוביל אותך לסיבה. בכל שלב אפשר לחזור אחורה.")}</p></Card>
+      {TREES.map(tr=> <button key={tr.id} onClick={()=>setTreeSel({ id:tr.id, path:[tr.start] })} style={{ ...rowBtn(), background:S.card, border:`1px solid ${S.bdr}`, borderRadius:"14px", padding:"14px", marginBottom:"8px", minHeight:"58px" }}><span style={{ fontSize:"24px" }}>{tr.icon}</span><span style={{ color:S.text, fontSize:"14px", fontWeight:700, flex:1 }}>{L2(tr.title)}</span><span style={{ color:S.muted }}>{dir==="rtl"?"‹":"›"}</span></button>)}
+    </>;
+    const tr = TREES.find(t=>t.id===treeSel.id); const nid = treeSel.path[treeSel.path.length-1]; const n = tr.nodes[nid];
+    const cc = n.circuit ? CIRCUITS.find(x=>x.id===n.circuit) : null;
+    return <>
+      <Card title={<span>{tr.icon} {L2(tr.title)}</span>} actions={<span style={{ color:S.muted, fontSize:"12px" }}>{T("שלב {n}",{ n:treeSel.path.length })}</span>}>
+        {n.end ? <>
+          <div style={{ background:`${S.green}14`, border:`1px solid ${S.green}`, borderRadius:"12px", padding:"12px", marginBottom:"10px" }}><div style={{ color:S.green, fontWeight:800, fontSize:"13px", marginBottom:"4px" }}>✅ {T("כיוון לתיקון")}</div><p style={{ color:S.text, fontSize:"14px", lineHeight:1.65, margin:0 }}>{L2(n.end)}</p></div>
+          {cc && <Btn kind="blue" onClick={()=>{ setCircOpen(cc.id); openSub("circuits"); }} style={{ width:"100%", marginBottom:"8px" }}>📘 {T("סכמה טיפוסית")}: {en()?cc.en.title:cc.he.title}</Btn>}
+          {(n.codes||[]).length>0 && <><div style={{ color:S.muted, fontSize:"12px", margin:"4px 0" }}>{T("קודים קשורים")}</div><div style={{ display:"flex", flexWrap:"wrap", gap:"5px", marginBottom:"8px" }}>{n.codes.map(cd=> <Chip key={cd} mono onClick={()=>searchCode(cd)}>{cd}</Chip>)}</div></>}
+        </> : <>
+          <p style={{ color:S.text, fontSize:"15px", fontWeight:700, lineHeight:1.55, margin:"0 0 8px" }}>{L2(n.q)}</p>
+          {n.hint && <p style={{ color:S.muted, fontSize:"12px", margin:"0 0 10px", lineHeight:1.5 }}>💡 {L2(n.hint)}</p>}
+          <div style={{ display:"flex", flexDirection:"column", gap:"7px" }}>{n.opts.map((op,i)=> <button key={i} onClick={()=>setTreeSel({ ...treeSel, path:[...treeSel.path, op.next] })} style={{ background:S.inner, border:`1px solid ${S.bdr}`, borderRadius:"12px", padding:"12px", color:S.text, fontSize:"14px", fontWeight:600, textAlign:"start", cursor:"pointer", fontFamily:"inherit", minHeight:"48px" }}>{L2(op.t)}</button>)}</div>
+        </>}
+        <div style={{ display:"flex", gap:"8px", marginTop:"10px" }}>
+          {treeSel.path.length>1 && <Btn kind="ghost" onClick={()=>setTreeSel({ ...treeSel, path:treeSel.path.slice(0,-1) })} style={{ flex:1 }}>{backArrow} {T("צעד אחורה")}</Btn>}
+          <Btn kind="ghost" onClick={()=>setTreeSel(n.end?{ id:tr.id, path:[tr.start] }:null)} style={{ flex:1 }}>{n.end?"🔄 "+T("מההתחלה"):"☰ "+T("כל העצים")}</Btn>
+        </div>
+      </Card>
+      {treeSel.path.length>1 && <Card title={"🧾 "+T("התשובות שלך")}>{treeSel.path.slice(0,-1).map((id,i)=>{ const nn = tr.nodes[id]; const nx = treeSel.path[i+1]; const op = (nn.opts||[]).find(o=>o.next===nx); return <p key={i} style={{ color:S.sub, fontSize:"12px", margin:"0 0 5px", lineHeight:1.5 }}><span style={{ color:S.muted }}>{i+1}. {L2(nn.q)}</span><br/>→ <strong style={{ color:S.text }}>{op?L2(op.t):""}</strong></p>; })}</Card>}
+    </>;
+  }
+  function RefScreen(){
+    const L2 = o => en() ? o.en : o.he;
+    const th = { color:S.muted, fontSize:"11px", fontWeight:700, padding:"5px", textAlign:"start", borderBottom:`1px solid ${S.bdr}` };
+    const td = { color:S.text, fontSize:"13px", padding:"6px 5px", borderBottom:`1px solid ${S.bdr}`, verticalAlign:"top" };
+    const det = (id, icon, title, body) => <details key={id} style={{ background:S.card, borderRadius:"14px", border:`1px solid ${S.bdr}`, marginBottom:"8px", overflow:"hidden" }}>
+      <summary style={{ padding:"13px 14px", cursor:"pointer", color:S.acc, fontWeight:700, fontSize:"14px", listStyle:"none", display:"flex", alignItems:"center", gap:"8px" }}><span style={{ fontSize:"20px" }}>{icon}</span><span style={{ flex:1 }}>{title}</span><span style={{ color:S.muted }}>▾</span></summary>
+      <div style={{ padding:"0 14px 14px" }}>{body}</div></details>;
+    return <>
+      {det("din","🔢",T("מספרי הדקים (DIN 72552)"), <table style={{ width:"100%", borderCollapse:"collapse" }}><tbody>{DIN.map(([k,v])=> <tr key={k}><td style={{ ...td, color:S.acc, fontWeight:800, fontFamily:"monospace", whiteSpace:"nowrap", width:"1%" }}>{k}</td><td style={td}>{L2(v)}</td></tr>)}</tbody></table>)}
+      {det("wire","🧵",T("עובי חוט מול זרם"), <><table style={{ width:"100%", borderCollapse:"collapse" }}><thead><tr><th style={th}>mm²</th><th style={th}>AWG</th><th style={th}>{T("זרם רציף (A)")}</th></tr></thead><tbody>{WIRES.map(([a,g,i])=> <tr key={a}><td style={{ ...td, fontWeight:700 }}>{a}</td><td style={td}>{g}</td><td style={{ ...td, color:S.acc, fontWeight:700 }}>{i}</td></tr>)}</tbody></table><p style={{ color:S.muted, fontSize:"11px", margin:"8px 0 0" }}>{T("ערכים טיפוסיים לחוט קצר בצרור. בחוט ארוך — חשב מפל מתח במחשבון. הנתיך מגן על החוט, לא על הצרכן.")}</p></>)}
+      {det("fuse","🟥",T("צבעי נתיכים"), <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"6px" }}>{FUSES.map(([a,col,nm])=> <div key={a} style={{ display:"flex", alignItems:"center", gap:"8px", background:S.inner, borderRadius:"10px", padding:"7px" }}><span style={{ width:"22px", height:"30px", borderRadius:"4px", background:col, border:"1px solid #777", flexShrink:0 }}/><span><b style={{ color:S.text, fontSize:"14px" }}>{a}A</b><br/><span style={{ color:S.muted, fontSize:"11px" }}>{L2(nm)}</span></span></div>)}</div>)}
+      {det("proto","📡",T("פרוטוקולי OBD"), <table style={{ width:"100%", borderCollapse:"collapse" }}><thead><tr><th style={th}>{T("פרוטוקול")}</th><th style={th}>{T("פינים")}</th><th style={th}>{T("איפה")}</th></tr></thead><tbody>{PROTOCOLS.map(([n,pins,d])=> <tr key={n}><td style={{ ...td, fontWeight:700, fontSize:"12px" }}>{n}</td><td style={{ ...td, fontFamily:"monospace" }}>{pins}</td><td style={{ ...td, fontSize:"12px", color:S.sub }}>{L2(d)}</td></tr>)}</tbody></table>)}
+      {SECTIONS.map(s=> det(s.id, s.icon, L2(s.title), s.items.map((it,i)=> <p key={i} style={{ color:S.text, fontSize:"13px", lineHeight:1.6, margin:"0 0 7px", paddingInlineStart:"14px", position:"relative" }}><span style={{ position:"absolute", insetInlineStart:0, color:S.acc }}>•</span>{L2(it)}</p>)))}
+      <Btn kind="blue" onClick={()=>openSub("circuits")} style={{ width:"100%", marginBottom:"8px" }}>📘 {T("סכמות טיפוסיות עם נקודות בדיקה")}</Btn>
+      <Btn kind="ghost" onClick={()=>openSub("sensors")} style={{ width:"100%" }}>📊 {T("ערכי חיישנים ומצבר")}</Btn>
+    </>;
+  }
+  function CalcScreen(){
+    const num = k => parseFloat(String(cv[k]).replace(",","."));
+    const inp = (k, label, unit) => <label style={{ flex:1, minWidth:"90px", color:S.sub, fontSize:"11px", fontWeight:700 }}>{label}<div style={{ display:"flex", alignItems:"center", gap:"4px", marginTop:"3px" }}><Field value={cv[k]} onChange={e=>setC(k,e.target.value)} inputMode="decimal" style={{ textAlign:"center", fontWeight:700 }}/><span style={{ color:S.muted, fontSize:"12px", whiteSpace:"nowrap" }}>{unit}</span></div></label>;
+    const nu = s => <span dir="ltr" style={{ unicodeBidi:"isolate", display:"inline-block" }}>{s}</span>;
+    const out = (txt, col) => <div style={{ background:S.inner, borderRadius:"10px", padding:"10px", marginTop:"10px", color:col||S.text, fontSize:"14px", fontWeight:700, lineHeight:1.6 }}>{txt}</div>;
+    // voltage drop: copper 0.0175 Ω·mm²/m, length is round trip
+    const L_ = num("vdL"), A_ = num("vdA"), I_ = num("vdI");
+    const vd = L_>0&&A_>0&&I_>=0 ? I_*0.0175*L_/A_ : null; const vdp = vd!==null ? vd/12*100 : null;
+    const minA = L_>0&&I_>0 ? [0.35,0.5,0.75,1,1.5,2.5,4,6,10,16,25,35,50].find(a=>I_*0.0175*L_/a <= 0.36) : null;
+    // LED resistor
+    const Vs = num("ledV"), Vf = num("ledF"), Im = num("ledI");
+    const R = Vs>Vf&&Im>0 ? (Vs-Vf)/(Im/1000) : null; const Pw = R ? (Vs-Vf)*(Im/1000) : null;
+    let Rstd = null; if(R){ const dec = Math.pow(10, Math.floor(Math.log10(R))); Rstd = (E12.map(v=>v*dec).concat([10*dec])).find(v=>v>=R*0.999); }
+    // parasitic draw
+    const dI = num("drI"), dAh = num("drAh"); const days = dI>0&&dAh>0 ? (dAh*0.5)/(dI/1000)/24 : null;
+    // power / fuse
+    const W = num("pwW"), V = num("pwV"); const amps = W>0&&V>0 ? W/V : null; const fuse = amps ? FUSE_STEPS.find(f=>f>=amps*1.25) : null;
+    const fmtR = r => r>=1000 ? (r/1000).toFixed(r>=10000?1:2).replace(/\.?0+$/,"")+" kΩ" : Math.round(r)+" Ω";
+    return <>
+      <Card title={"📉 "+T("מפל מתח בחוט")}>
+        <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>{inp("vdL",T("אורך הלוך-חזור"),"m")}{inp("vdA",T("חתך"),"mm²")}{inp("vdI",T("זרם"),"A")}</div>
+        {vd!==null && out(<>{T("מפל מתח")}: {nu(`${vd.toFixed(2)} V (${vdp.toFixed(1)}%)`)}<br/><span style={{ color:vdp>3?S.red:S.green, fontSize:"13px" }}>{vdp>3?"⚠️ "+T("יותר מ-3% — כדאי חוט עבה יותר"):"✅ "+T("תקין (עד 3%)")}</span>{minA && <><br/><span style={{ color:S.sub, fontSize:"13px" }}>{T("חתך מינימלי ל-3%")}: {nu(`${minA} mm²`)}</span></>}</>)}
+        <p style={{ color:S.muted, fontSize:"11px", margin:"6px 0 0" }}>{T("חוט נחושת ב-20°C. אם האדמה דרך השלדה — הכנס רק את אורך חוט הפלוס.")}</p>
+      </Card>
+      <Card title={"💡 "+T("נגד ל-LED")}>
+        <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>{inp("ledV",T("מתח הזנה"),"V")}{inp("ledF",T("מתח LED"),"V")}{inp("ledI",T("זרם LED"),"mA")}</div>
+        {R && out(<>{T("נגד")}: {nu(fmtR(R))} · {T("ערך תקני")}: {nu(fmtR(Rstd))}<br/><span style={{ color:S.sub, fontSize:"13px" }}>{T("הספק")}: {nu(`${Pw.toFixed(2)} W`)} · {T("נגד של")} {nu(`${Pw*2<=0.25?"¼":Pw*2<=0.5?"½":Pw*2<=1?"1":"2"} W`)}</span></>)}
+        <p style={{ color:S.muted, fontSize:"11px", margin:"6px 0 0" }}>{T("ברכב עם מנוע עובד המתח מגיע ל-14.4V — חשב לפיו. LED אדום ~2V, לבן/כחול ~3.2V.")}</p>
+      </Card>
+      <Card title={"🔋 "+T("זרם זליגה — כמה ימים עד שהמצבר לא יתניע")}>
+        <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>{inp("drI",T("זרם זליגה"),"mA")}{inp("drAh",T("קיבולת מצבר"),"Ah")}</div>
+        {days!==null && out(<>{T("בערך {d} ימים עד חצי מצבר",{ d: days>=10?Math.round(days):days.toFixed(1) })}<br/><span style={{ color:dI>50?S.red:S.green, fontSize:"13px" }}>{dI>50?"⚠️ "+T("מעל 50mA — חפש מה לא נרדם"):"✅ "+T("זליגה סבירה (עד 50mA)")}</span></>)}
+      </Card>
+      <Card title={"⚡ "+T("הספק, זרם ונתיך")}>
+        <div style={{ display:"flex", gap:"8px", flexWrap:"wrap" }}>{inp("pwW",T("הספק"),"W")}{inp("pwV",T("מתח"),"V")}</div>
+        {amps && out(<>{T("זרם")}: {nu(`${amps.toFixed(1)} A`)}<br/><span style={{ color:S.sub, fontSize:"13px" }}>{T("נתיך מומלץ")}: {nu(`${fuse||"—"} A`)} · {T("חוט מינימלי")}: {nu(`${(WIRES.find(w=>parseFloat(w[2])>=(fuse||amps))||WIRES[WIRES.length-1])[0]} mm²`)}</span></>)}
+      </Card>
+      <Btn kind="ghost" onClick={()=>openSub("convert")} style={{ width:"100%" }}>🔄 {T("ממיר יחידות וחוק אוהם")}</Btn>
+    </>;
+  }
   function ConvertScreen(){
     const v=parseFloat(ohmV), i=parseFloat(ohmI), r=parseFloat(ohmR); let res=null;
     if(v&&i&&!ohmR) res={ label:"R = V / I", value:(v/i).toFixed(3), unit:"Ω", color:S.blue };
@@ -967,7 +1325,7 @@ export default function App(){
       <main style={{ padding:"10px", paddingBottom:"calc(88px + env(safe-area-inset-bottom))", maxWidth:"720px", margin:"0 auto" }}>
         {sub ? <>
           {sub.id==="obd" && ObdScreen()}{sub.id==="diag" && DiagScreen()}{sub.id==="sensors" && SensorsScreen()}{sub.id==="wires" && WiresScreen()}
-          {sub.id==="convert" && ConvertScreen()}{sub.id==="all" && AllScreen()}{sub.id==="settings" && SettingsScreen()}{sub.id==="about" && AboutScreen()}
+          {sub.id==="convert" && ConvertScreen()}{sub.id==="all" && AllScreen()}{sub.id==="settings" && SettingsScreen()}{sub.id==="about" && AboutScreen()}{sub.id==="lib" && LibScreen()}{sub.id==="circuits" && CircuitsScreen()}{sub.id==="trees" && TreesScreen()}{sub.id==="ref" && RefScreen()}{sub.id==="calc" && CalcScreen()}
         </> : <>
           {tab==="home" && Home()}{tab==="code" && CodeTab()}{tab==="scan" && ScanTab()}{tab==="log" && LogTab()}{tab==="more" && MoreTab()}
         </>}
@@ -1025,6 +1383,8 @@ export default function App(){
       {/* image viewer */}
       {imgView && <div style={{ ...overlay, zIndex:300, background:"rgba(0,0,0,.92)" }} onClick={()=>setImgView(null)}><img src={imgView} alt="" style={{ maxWidth:"100%", maxHeight:"90vh", borderRadius:"8px" }}/></div>}
 
+      {dgSheet && <DiagramSheet key={dgSheet.meta?dgSheet.meta.id:"new"} init={dgSheet.meta} preset={dgVeh()} busy={dgBusy} onSave={saveDiagram} onDelete={deleteDiagram} onClose={()=>setDgSheet(null)} askConfirm={askConfirm} backArrow={backArrow}/>}
+      {dgView && <DiagramViewer meta={dgView} onClose={()=>setDgView(null)} onMarks={mk=>setMarks(dgView.id, mk)} onEdit={()=>setDgSheet({ meta:dgView })} askConfirm={askConfirm} backArrow={backArrow}/>}
       {/* onboarding guide */}
       {guideStep>=0 && <div style={{ ...overlay, zIndex:400 }}><div role="dialog" aria-modal="true" style={{ background:S.card, borderRadius:"18px", border:`2px solid ${S.acc}`, width:"100%", maxWidth:"380px", padding:"22px 18px", textAlign:"center" }}>
         <div style={{ fontSize:"46px" }}>{guideSteps[guideStep][0]}</div>

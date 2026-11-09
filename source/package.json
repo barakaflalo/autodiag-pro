@@ -1,9 +1,18 @@
 {
   "name": "autodiag-pro",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
-  "scripts": { "build": "vite build" },
-  "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1" },
-  "devDependencies": { "vite": "^5.4.10", "@vitejs/plugin-react": "^4.3.3" }
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.10"
+  }
 }

@@ -112,7 +112,7 @@ export function openExt(url){
 
 
 // ═══ App context shared with non-React helpers (print/share) ═══
-export const APP_VERSION = "1.3.0";
+export const APP_VERSION = "1.4.0";
 export const ctx = { lang: "he", user: { name: "", phone: "" } };
 export const ABOUT = {
   title: "AutoDiag Pro",
@@ -128,6 +128,10 @@ export async function deleteData(key){
   try{ const db = await openDB(); if(db) await idbReq(db,"readwrite",st=>st.delete(key)); }catch(e){}
   try{ localStorage.removeItem(key); }catch(e){}
 }
+// Large files (diagram pages) go straight to IndexedDB — never to localStorage or memory.
+export async function blobPut(key, blob){ const db = await openDB(); if(!db) throw new Error("no-idb"); await idbReq(db,"readwrite",st=>st.put(blob,key)); }
+export async function blobGet(key){ const db = await openDB(); if(!db) return null; try{ const v = await idbReq(db,"readonly",st=>st.get(key)); return v||null; }catch(e){ return null; } }
+export async function blobDel(key){ const db = await openDB(); if(!db) return; try{ await idbReq(db,"readwrite",st=>st.delete(key)); }catch(e){} }
 export function toast(msg){ try{ window.dispatchEvent(new CustomEvent("adp-toast",{detail:msg})); }catch(e){} }
 
 // Print through a hidden iframe (window.open is null inside an installed app).

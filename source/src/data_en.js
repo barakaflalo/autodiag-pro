@@ -2,9 +2,11 @@
 import { C1 } from "./codes_en_1.js";
 import { C2 } from "./codes_en_2.js";
 import { C3 } from "./codes_en_3.js";
+import { GEN_EN } from "./codes_gen.js";
 
 const RAW = { ...C1, ...C2, ...C3 };
 export const CODES_EN = {};
+for (const k in GEN_EN) CODES_EN[k] = GEN_EN[k];
 for (const k in RAW) { const [desc, causes, steps, location] = RAW[k]; CODES_EN[k] = { desc, causes, steps, location }; }
 
 export const SAFE_EN = {

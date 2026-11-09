@@ -1,4 +1,6 @@
 // AutoDiag Pro — built-in data (Hebrew is the source language)
+import { GEN, FAMILY, FAMILIES, circuitFor } from "./codes_gen.js";
+export { circuitFor };
 const CODES_DB = {
 // ═══ P0xxx — POWERTRAIN GENERIC ═══
 "P0010":{en:"Camshaft Position Actuator Circuit (Bank 1)",he:"מעגל מפעיל גל זיזים A (בנק 1)",severity:"בינונית",safe:"כן",desc:"תקלה במעגל VVT בנק 1.",causes:["סולנואיד VVT תקול","חיווט/מחבר","שמן מלוכלך","ECM"],steps:["בדוק רמת שמן ומצבו","בדוק מחבר VVT","מדוד התנגדות סולנואיד (7-12Ω)","בדוק חיווט","החלף סולנואיד"],location:"סולנואיד VVT בראש מנוע, ליד גל זיזים, בנק 1."},
@@ -156,7 +158,6 @@ const CODES_DB = {
 "B2799":{en:"Engine Immobilizer System Malfunction (Toyota)",he:"תקלת אימובילייזר (Toyota)",severity:"גבוהה",safe:"לא יתניע",desc:"Toyota — מערכת אימובילייזר.",causes:["מפתח לא מזוהה","שבב RFID","סליל אנטנה","ECU אימובילייזר"],steps:["נסה מפתח גיבוי","בדוק סליל מפתח","בדוק ECU אימובילייזר","ייתכן תכנות"],location:"סליל סביב מנעול הצתה, ECU אימובילייזר."},
 // ═══ NETWORK — Uxxx ═══
 "U0001":{en:"High Speed CAN Communication Bus",he:"תקשורת CAN מהירה",severity:"גבוהה",safe:"כן, בזהירות",desc:"תקלת CAN Bus.",causes:["חיווט CAN (35%)","מחשב שמפיל רשת (25%)","נגד סיום חסר (15%)","מחבר (15%)","ECU (10%)"],steps:["מדוד CAN: High≈2.5-3.5V, Low≈1.5-2.5V","מדוד התנגדות CAN-H↔CAN-L: 60Ω","נתק מחשבים אחד-אחד","בדוק חיווט"],location:"CAN נגיש במחבר OBD: פין 6=CAN-H, פין 14=CAN-L."},
-"U0073":{en:"CAN Bus A Off",he:"ערוץ CAN A כבוי",severity:"גבוהה",safe:"כן, בזהירות",desc:"ערוץ CAN לא פעיל.",causes:["חיווט","מחשב שמפיל","נתיך"],steps:["בדוק נתיכים","מדוד CAN","נתק מחשבים"],location:"חיווט CAN ברכב."},
 "U0100":{en:"Lost Communication With ECM/PCM",he:"אובדן תקשורת עם ECM",severity:"קריטית",safe:"לא מומלץ",desc:"אין תקשורת עם מחשב מנוע.",causes:["חיווט CAN (30%)","מחבר ECM (25%)","ECM תקול (20%)","נתיך (15%)","אדמה (10%)"],steps:["בדוק נתיכי ECM","בדוק מחבר ECM — נקה","בדוק אדמות ECM","מדוד CAN על OBD","בדוק חיווט CAN ל-ECM","ייתכן ECM תקול"],location:"ECM — מיקום משתנה. CAN: OBD פין 6+14."},
 "U0101":{en:"Lost Communication With TCM",he:"אובדן תקשורת עם מחשב תיבה",severity:"גבוהה",safe:"כן, תיבה עלולה להישאר בהילוך",desc:"אין תקשורת TCM.",causes:["TCM","חיווט CAN","מחבר","נתיך"],steps:["בדוק נתיכים","בדוק מחבר TCM","בדוק CAN","בדוק אדמה"],location:"TCM על תיבה."},
 "U0121":{en:"Lost Communication With ABS",he:"אובדן תקשורת ABS",severity:"גבוהה",safe:"כן, ללא ABS",desc:"אין תקשורת עם ABS.",causes:["מודול ABS","חיווט","מחבר","נתיך"],steps:["בדוק נתיכי ABS","בדוק מחבר","בדוק CAN"],location:"מודול ABS בתא מנוע."},
@@ -313,7 +314,6 @@ const CODES_DB = {
 "C0131":{en:"ABS/TCS Pressure Circuit",he:"מעגל לחץ ABS/TCS",severity:"גבוהה",safe:"כן, ללא ABS",desc:"לחץ הידראולי.",causes:["מודול","סולנואיד","חיווט"],steps:["בדוק מודול","בדוק חיווט"],location:"מודול ABS."},
 "C0242":{en:"PCM Indicated TCS Fault",he:"תקלת TCS מ-PCM",severity:"בינונית",safe:"כן",desc:"PCM מדווח תקלה ל-ABS.",causes:["תקלת מנוע","CAN","PCM"],steps:["סרוק מנוע","בדוק CAN","טפל בתקלת מנוע"],location:"ECM via CAN."},
 "U0019":{en:"High Speed CAN Communication Bus Performance",he:"ביצועי CAN מהיר",severity:"בינונית",safe:"כן",desc:"CAN איטי/מופרע.",causes:["חיווט","מחשב","רעש"],steps:["מדוד CAN","בדוק חיווט","נתק מחשבים"],location:"חיווט CAN."},
-"U0168":{en:"Lost Communication With TPMS Module",he:"אובדן תקשורת TPMS (לחץ צמיגים)",severity:"נמוכה",safe:"כן",desc:"מערכת לחץ צמיגים.",causes:["מודול TPMS","חיישן גלגל","חיווט"],steps:["בדוק מודול","בדוק חיישנים","בדוק חיווט"],location:"מודול TPMS, חיישנים בגלגלים."},
 "U0300":{en:"Internal Control Module Software Incompatibility",he:"אי-תאימות תוכנה ב-ECU",severity:"בינונית",safe:"כן",desc:"עדכון תוכנה לא תואם.",causes:["עדכון שגוי","ECU לא מתאים","flash נכשל"],steps:["עדכן מחדש","בדוק גרסה","פנה למומחה"],location:"ECU."},
 };
 
@@ -391,7 +391,7 @@ const SYMPTOMS = [
   {id:"s24",text:"🚪 נעילה/חלונות חשמליים לא עובדים",codes:["B1421","B2296","U0199"],tip:"בדוק חיווט בגומי דלת, מנוע/actuator, מתגים, BCM"},
   {id:"s25",text:"📡 תקשורת CAN — סורק לא מתחבר",codes:["U0001","U0073","U0100","U0146"],tip:"בדוק פין 6+14 ב-OBD, נתיכים, חיווט CAN, Gateway"},
   {id:"s26",text:"🔋 מצבר מתרוקן / לא נטען",codes:["P0562","P0563","P0560","P0685","P0689"],tip:"בדוק אלטרנטור, מצבר, זרם חושך, ממסר ראשי"},
-  {id:"s27",text:"🔔 לחץ צמיגים — TPMS",codes:["U0168"],tip:"בדוק לחץ צמיגים, חיישני TPMS, מודול"},
+  {id:"s27",text:"🔔 לחץ צמיגים — TPMS",codes:["U0127"],tip:"בדוק לחץ צמיגים, חיישני TPMS, מודול"},
 ];
 
 const CAR_MAKES = Object.keys(CAR_MODELS);
@@ -469,6 +469,18 @@ const DICT = [
   {en:"Solenoid",he:"סולנואיד"},{en:"Freeze Frame",he:"תמונת מצב בזמן תקלה"},{en:"Readiness/Monitors",he:"מוכנות בדיקות OBD"},{en:"Limp Mode",he:"מצב חירום/מוגבל"},
 ];
 
+// generated generic codes fill the gaps; hand-written entries above always win
+const HAND = new Set(Object.keys(CODES_DB));
+for (const k in GEN) if (!HAND.has(k)) CODES_DB[k] = GEN[k];
+// related codes: same generated family, or same number block for hand-written codes
+function relatedCodes(code){
+  const fam = FAMILY[code];
+  let list = fam ? FAMILIES[fam].filter(c=>c!==code) : [];
+  if (list.length > 14) { const i = FAMILIES[fam].indexOf(code); list = FAMILIES[fam].slice(Math.max(0,i-6), i+8).filter(c=>c!==code); }
+  if (!list.length) { const base = code.slice(0,4); list = Object.keys(CODES_DB).filter(c=>c!==code && c.slice(0,4)===base).slice(0,10); }
+  return list.filter(c=>CODES_DB[c]);
+}
+export { relatedCodes, HAND as HAND_CODES };
 export { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT };
 
 // Israeli registry maker names (Hebrew, as in data.gov.il) → English make used in the app.

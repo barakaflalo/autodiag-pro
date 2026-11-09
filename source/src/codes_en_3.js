@@ -97,6 +97,5 @@ export const C3 = {
 "C0131":["Hydraulic pressure.",["Module","Solenoid","Wiring"],["Check the module","Check the wiring"],"ABS module."],
 "C0242":["The PCM reports a fault to the ABS.",["Engine fault","CAN bus","PCM"],["Scan the engine","Check the CAN bus","Fix the engine fault"],"ECM via CAN."],
 "U0019":["CAN slow/disturbed.",["Wiring","Module","Noise"],["Measure the CAN bus","Check the wiring","Disconnect modules"],"CAN wiring."],
-"U0168":["Tyre pressure system.",["TPMS module","Wheel sensor","Wiring"],["Check the module","Check the sensors","Check the wiring"],"TPMS module, sensors in the wheels."],
 "U0300":["Incompatible software update.",["Wrong update","Unsuitable ECU","Failed flash"],["Update again","Check the version","Refer to a specialist"],"ECU."],
 };

@@ -23,9 +23,9 @@ CacheStorage.prototype.match=function(){return sm.apply(this,arguments).then(cle
    Page (navigation): network first (4s), cache as offline fallback → new uploads always win when online.
    Files in assets/ have a content hash in their name → cache first.
    VERSION goes up with every release (same number as APP_VERSION and manifest). */
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const CACHE = 'autodiag-' + VERSION;
-const PRECACHE = ["./","./manifest.json","./privacy_policy.html","./icon.svg","./icon-192.png","./icon-512.png","./assets/index-Bm7FixCm.js"];
+const PRECACHE = ["./","./manifest.json","./privacy_policy.html","./icon.svg","./icon-192.png","./icon-512.png","./assets/index-Ck-p3HHZ.js","./assets/pdf.min-N4RGOxZg.js","./assets/pdf.worker.min-GtxnNB1h.js","./assets/pdf.worker.min-yatZIOMy.js"];
 
 self.addEventListener('install', e => {
   e.waitUntil(
