@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { DG_SYSTEMS, dgSystemName, dgMatches, filesToPages, savePages, deletePages, loadPage, exportLibrary, importLibrary, storageInfo, fmtMB, MAX_PAGES } from "./diaglib.js";
 import { CIRCUITS } from "./circuits.js";
 import { TREES } from "./trees.js";
+import { answer, suggestions, aiContext } from "./assistant.js";
+import { askAI, AI_PROVIDERS, cleanKey } from "./ai.js";
 import { DIN, WIRES, FUSES, PROTOCOLS, SECTIONS, E12, FUSE_STEPS } from "./techref.js";
 import { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT, makeFromHe, relatedCodes, circuitFor } from "./data.js";
 import { CODES_EN, SAFE_EN, SYMPTOMS_EN, SENSORS_EN, WIRE_TYPES_EN, WIRE_COLORS_EN, CONV_CAT_EN, BATTERY_EN } from "./data_en.js";
@@ -38,6 +40,23 @@ const fmtDate = (at, ts) => { if(at){ try{ return new Date(at).toLocaleString(en
 const isCodeLike = s => /^[PCBU][0-9A-F]{4}$/i.test(String(s).trim());
 const DEFAULT_SETTINGS = { name:"", phone:"", lang:"he", theme:"gold", zoom:1, guideDone:false };
 
+// logo for reports: keep transparency (PNG), max 360px
+function logoFrom(file){
+  return new Promise(res=>{ try{ const u = URL.createObjectURL(file); const im = new Image();
+    im.onload = ()=>{ const s = Math.min(1, 360/Math.max(im.width, im.height)); const cv = document.createElement("canvas"); cv.width = Math.max(1,Math.round(im.width*s)); cv.height = Math.max(1,Math.round(im.height*s)); cv.getContext("2d").drawImage(im,0,0,cv.width,cv.height); URL.revokeObjectURL(u); res(cv.toDataURL("image/png")); };
+    im.onerror = ()=>{ URL.revokeObjectURL(u); res(""); }; im.src = u; }catch(e){ res(""); } });
+}
+// tiny line chart for live data (no library)
+function LiveChart({ data, big }){
+  const d = (data||[]).slice(big ? -120 : -40); const W = big ? 300 : 90, H = big ? 110 : 18;
+  if(d.length < 2) return big ? <div style={{ height:H+"px", display:"flex", alignItems:"center", justifyContent:"center", color:S.muted, fontSize:"12px" }}>{T("מחכה לנתונים...")}</div> : <div style={{ height:H+"px" }}/>;
+  let mn = Math.min(...d), mx = Math.max(...d); if(mx-mn < 1e-6){ mx += 1; mn -= 1; }
+  const pts = d.map((v,i)=>`${(i/(d.length-1)*W).toFixed(1)},${(H-2-(v-mn)/(mx-mn)*(H-4)).toFixed(1)}`).join(" ");
+  return <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width:"100%", height:H+"px", display:"block", marginTop:big?"6px":"2px" }} aria-hidden="true">
+    {big && [0.25,0.5,0.75].map(f=> <line key={f} x1="0" x2={W} y1={H*f} y2={H*f} stroke={S.bdr} strokeWidth="0.6"/>)}
+    <polyline points={pts} fill="none" stroke={S.acc} strokeWidth={big?2:1.4} strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
+  </svg>;
+}
 // ═══ Small UI pieces ═══
 function Card({ children, title, actions, style }){
   return <div style={{ background:S.card, borderRadius:"14px", padding:"14px", marginBottom:"10px", border:`1px solid ${S.bdr}`, ...style }}>
@@ -265,6 +284,127 @@ function DiagramSheet({ init, preset, busy, onSave, onDelete, onClose, askConfir
   </div>, document.body);
 }
 
+// ═══ AutoDiag assistant: answers offline from the app's knowledge; optional online AI with the user's own key ═══
+function MiniMd({ text }){
+  const lines = String(text||"").split("\n");
+  const inline = s => String(s).split("**").map((p,i)=> i%2 ? <strong key={i} style={{ color:S.text }}>{p}</strong> : <span key={i}>{p}</span>);
+  return <>{lines.map((l,i)=>{
+    if(!l.trim()) return <div key={i} style={{ height:"6px" }}/>;
+    const b = /^\s*[•\-\*]\s+/.test(l), n = /^\s*\d+\.\s+/.exec(l);
+    return <p key={i} style={{ margin:"0 0 3px", lineHeight:1.6, paddingInlineStart:(b||n)?"14px":0, position:"relative" }}>{(b||n) && <span style={{ position:"absolute", insetInlineStart:0, color:S.acc }}>{n?n[0].trim():"•"}</span>}{inline(l.replace(/^\s*[•\-\*]\s+|^\s*\d+\.\s+/,""))}</p>;
+  })}</>;
+}
+function AssistantPanel({ onClose, getCtx, messages, setMessages, aiCfg, setAiCfg, onAction, actLabel, askConfirm, backArrow, view, setView }){
+  const [q,setQ] = useState(""); const [busy,setBusy] = useState(""); const [listening,setListening] = useState(false); const [showKey,setShowKey] = useState(false);
+  const endRef = useRef(null); const recRef = useRef(null); const inRef = useRef(null);
+  const hasKey = !!cleanKey(aiCfg.key);
+  const SR = typeof window!=="undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+  useEffect(()=>{ try{ endRef.current && endRef.current.scrollIntoView({ behavior:"smooth", block:"end" }); }catch(e){} },[messages.length, busy]);
+  useEffect(()=>()=>{ try{ recRef.current && recRef.current.stop(); window.speechSynthesis && window.speechSynthesis.cancel(); }catch(e){} },[]);
+  const add = m => setMessages(p=>[...p, { id:uid(), at:Date.now(), ...m }].slice(-80));
+  async function goAI(question, offline){
+    if(!navigator.onLine){ add({ role:"bot", text:T("אין חיבור לאינטרנט — התשובה למעלה היא מהמידע שבאפליקציה."), err:true }); return; }
+    setBusy("ai");
+    try{
+      const ctx = getCtx(); const hist = messages.filter(m=>m.role==="user"||m.ai).slice(-6).map(m=>({ role:m.role, text:m.text||"" }));
+      const txt = await askAI({ provider:aiCfg.provider, key:aiCfg.key, model:aiCfg.model, question, appKnowledge: offline ? offline.ctxText : "", carContext: aiContext(ctx), history:hist, lang:ctx.lang });
+      add({ role:"bot", ai:true, text: txt || T("לא התקבלה תשובה.") });
+    }catch(e){
+      const m = String(e && e.message || e);
+      add({ role:"bot", err:true, text: m==="no-key" ? T("לא הוגדר מפתח AI.") : m==="timeout" ? T("ה-AI לא ענה בזמן. נסה שוב.") : /api key|permission|401|403|invalid/i.test(m) ? T("המפתח לא התקבל — בדוק אותו בהגדרות העוזר.") : T("שגיאה מה-AI: {m}",{ m:m.slice(0,140) }) });
+    }finally{ setBusy(""); }
+  }
+  function send(text){
+    const question = String(text ?? q).trim(); if(!question || busy) return;
+    setQ(""); add({ role:"user", text:question });
+    setBusy("local");
+    setTimeout(()=>{
+      let r; try{ r = answer(question, getCtx()); }catch(e){ r = { parts:[T("משהו השתבש בעיבוד השאלה.")], acts:[], conf:0, ctxText:"" }; }
+      add({ role:"bot", text:r.parts.join("\n\n"), acts:r.acts, conf:r.conf, q:question, ctxText:r.ctxText });
+      setBusy("");
+      if(hasKey && aiCfg.auto && r.conf < 0.6) goAI(question, r);
+    }, 60);
+  }
+  function mic(){
+    if(!SR) return;
+    if(listening){ try{ recRef.current && recRef.current.stop(); }catch(e){} return; }
+    try{
+      const rec = new SR(); recRef.current = rec; rec.lang = en() ? "en-US" : "he-IL"; rec.interimResults = true; rec.maxAlternatives = 1;
+      let finalText = "";
+      rec.onresult = e => { let t = ""; for(let i=0;i<e.results.length;i++) t += e.results[i][0].transcript; finalText = t; setQ(t); };
+      rec.onend = () => { setListening(false); if(finalText.trim()) send(finalText); };
+      rec.onerror = ev => { setListening(false); if(ev && ev.error==="network") toast(T("זיהוי דיבור צריך אינטרנט במכשיר הזה")); };
+      setListening(true); rec.start();
+    }catch(e){ setListening(false); }
+  }
+  function speak(text){
+    try{
+      const ss = window.speechSynthesis; if(!ss) return; ss.cancel();
+      const u = new SpeechSynthesisUtterance(String(text).replace(/\*\*/g,"").replace(/[•📍📘🧭📖📊📐📝📋⚠️✅]/g,"")); u.lang = en() ? "en-US" : "he-IL"; u.rate = 1.02; ss.speak(u);
+    }catch(e){}
+  }
+  const sugg = suggestions(getCtx());
+  const head = { position:"sticky", top:0, background:S.card, borderBottom:`2px solid ${S.acc}`, padding:"8px 10px", display:"flex", alignItems:"center", gap:"8px", zIndex:2 };
+  const backBtn = { background:"transparent", border:`1px solid ${S.bdr}`, color:S.acc, borderRadius:"10px", padding:"8px 12px", fontSize:"13px", fontWeight:700, cursor:"pointer", fontFamily:"inherit", minHeight:"40px", whiteSpace:"nowrap" };
+  const lab = { color:S.sub, fontSize:"12px", fontWeight:700, display:"block" };
+  return createPortal(<div dir={en()?"ltr":"rtl"} style={{ position:"fixed", inset:0, zIndex:230, background:S.bg, color:S.text, display:"flex", flexDirection:"column", fontFamily:"'Segoe UI',Tahoma,Arial,sans-serif" }}>
+    <div style={head}>
+      <button onClick={view==="settings" ? ()=>setView("chat") : onClose} style={backBtn}>{backArrow} {view==="settings" ? T("העוזר") : T("חזרה")}</button>
+      <div style={{ flex:1, minWidth:0 }}><div style={{ fontWeight:800, fontSize:"15px" }}>🤖 {view==="settings" ? T("הגדרות העוזר") : T("העוזר של AutoDiag")}</div>
+        {view!=="settings" && <div style={{ fontSize:"11px", color:hasKey?S.green:S.muted }}>{hasKey ? "● "+T("מקומי + AI ({p})",{ p:(AI_PROVIDERS[aiCfg.provider]||AI_PROVIDERS.gemini).name }) : "● "+T("עובד בלי אינטרנט, מהמידע שבאפליקציה")}</div>}</div>
+      {view!=="settings" && <IconBtn label={T("הגדרות העוזר")} onClick={()=>setView("settings")}>⚙️</IconBtn>}
+    </div>
+    {view==="settings" ? <div style={{ flex:1, overflow:"auto", padding:"12px", maxWidth:"720px", width:"100%", margin:"0 auto", boxSizing:"border-box" }}>
+      <Card title={"🧠 "+T("איך העוזר עובד")}><p style={{ color:S.sub, fontSize:"13px", lineHeight:1.65, margin:0 }}>{T("בלי מפתח ובלי אינטרנט העוזר עונה מכל מה שבאפליקציה: מאגר הקודים ושילובי קודים, הסריקה האחרונה, עצי אבחון, סכמות טיפוסיות, ערכי חיישנים, חישובים, והיומן וההערות שלך. אם תוסיף מפתח AI משלך, הוא יוכל גם לשלוח את השאלה לבינה מלאכותית ברשת — יחד עם מה שהאפליקציה כבר מצאה.")}</p></Card>
+      <Card title={"🌐 "+T("AI ברשת (לא חובה)")}>
+        <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
+          <label style={lab}>{T("ספק")}<Select value={aiCfg.provider} onChange={e=>setAiCfg({ ...aiCfg, provider:e.target.value, model:"" })} label={T("ספק")} style={{ marginTop:"4px" }}>{Object.entries(AI_PROVIDERS).map(([k,p])=> <option key={k} value={k}>{p.name}</option>)}</Select></label>
+          <label style={lab}>{T("מפתח API")}<div style={{ display:"flex", gap:"6px", marginTop:"4px" }}><Field type={showKey?"text":"password"} value={aiCfg.key} onChange={e=>setAiCfg({ ...aiCfg, key:e.target.value })} placeholder={aiCfg.provider==="openai"?"sk-...":"AIza..."} autoComplete="off" style={{ direction:"ltr", fontFamily:"monospace" }}/><Btn kind="ghost" onClick={()=>setShowKey(!showKey)} label={T("הצג מפתח")}>{showKey?"🙈":"👁️"}</Btn></div></label>
+          <button onClick={()=>openExt((AI_PROVIDERS[aiCfg.provider]||AI_PROVIDERS.gemini).keyUrl)} style={{ background:"none", border:"none", color:S.blue, textAlign:"start", padding:0, cursor:"pointer", fontFamily:"inherit", fontSize:"13px" }}>🔑 {aiCfg.provider==="openai" ? T("איפה מקבלים מפתח OpenAI") : T("איפה מקבלים מפתח Gemini חינמי")} ↗</button>
+          <label style={lab}>{T("מודל (לא חובה)")}<Field value={aiCfg.model} onChange={e=>setAiCfg({ ...aiCfg, model:e.target.value })} placeholder={(AI_PROVIDERS[aiCfg.provider]||AI_PROVIDERS.gemini).model} style={{ marginTop:"4px", direction:"ltr", fontFamily:"monospace" }}/></label>
+          <label style={{ display:"flex", alignItems:"center", gap:"8px", color:S.text, fontSize:"13px", cursor:"pointer" }}><input type="checkbox" checked={!!aiCfg.auto} onChange={e=>setAiCfg({ ...aiCfg, auto:e.target.checked })} style={{ width:"20px", height:"20px", accentColor:S.acc }}/>{T("שאל את ה-AI אוטומטית כשאין תשובה טובה באפליקציה")}</label>
+          <p style={{ color:S.muted, fontSize:"11px", margin:0, lineHeight:1.5 }}>🔒 {T("המפתח נשמר רק בטלפון. כשאתה שולח שאלה ל-AI, היא נשלחת לספק שבחרת יחד עם פרטי הרכב והסריקה — לא מספר רישוי ולא שם לקוח.")}</p>
+        </div>
+      </Card>
+      <Card title={"🧹 "+T("שיחה")}><Btn kind="danger" disabled={!messages.length} onClick={()=>askConfirm({ text:T("למחוק את כל השיחה עם העוזר?"), ok:T("מחק"), danger:true, onOk:()=>setMessages([]) })} style={{ width:"100%" }}>🗑️ {T("נקה שיחה")}</Btn></Card>
+    </div> : <>
+      <div style={{ flex:1, overflow:"auto", padding:"12px 10px", maxWidth:"760px", width:"100%", margin:"0 auto", boxSizing:"border-box" }}>
+        {!messages.length && <div style={{ textAlign:"center", padding:"14px 6px", color:S.sub }}>
+          <div style={{ fontSize:"42px" }}>🤖</div>
+          <p style={{ fontSize:"14px", lineHeight:1.65, margin:"6px 0 12px" }}>{T("שאל אותי על קוד או כמה קודים יחד, על תקלה, על ערך שמדדת, על חיישן, הדק או פין — או בקש לנתח את הסריקה. אני עובד גם בלי אינטרנט.")}</p>
+        </div>}
+        {messages.map(m=> m.role==="user"
+          ? <div key={m.id} style={{ display:"flex", justifyContent:"flex-end", margin:"0 0 8px" }}><div style={{ background:S.acc, color:S.onAcc, padding:"9px 12px", borderRadius:"14px", borderEndEndRadius:"4px", maxWidth:"85%", fontSize:"14px", fontWeight:600, whiteSpace:"pre-wrap" }}>{m.text}</div></div>
+          : <div key={m.id} style={{ margin:"0 0 10px", maxWidth:"94%" }}>
+              <div style={{ background:m.err?`${S.red}14`:m.ai?`${S.blue}14`:S.card, border:`1px solid ${m.err?S.red:m.ai?S.blue:S.bdr}`, padding:"10px 12px", borderRadius:"14px", borderEndStartRadius:"4px", fontSize:"14px", color:S.sub }}>
+                {m.ai && <div style={{ color:S.blue, fontSize:"11px", fontWeight:800, marginBottom:"4px" }}>🌐 {T("תשובת AI")}</div>}
+                <MiniMd text={m.text}/>
+              </div>
+              {(m.acts||[]).length>0 && <div style={{ display:"flex", flexWrap:"wrap", gap:"5px", marginTop:"5px" }}>{m.acts.map((a,i)=> <button key={i} onClick={()=>onAction(a)} style={{ background:S.inner, border:`1px solid ${S.bdr}`, color:S.acc, borderRadius:"9px", padding:"6px 10px", fontSize:"12px", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{actLabel(a)}</button>)}</div>}
+              <div style={{ display:"flex", gap:"2px", marginTop:"2px" }}>
+                <IconBtn label={T("הקרא")} onClick={()=>speak(m.text)}>🔊</IconBtn>
+                <IconBtn label={T("העתק")} onClick={()=>{ try{ navigator.clipboard.writeText(String(m.text).replace(/\*\*/g,"")); toast(T("הועתק")); }catch(e){} }}>📋</IconBtn>
+                {!m.ai && !m.err && m.q && hasKey && <button onClick={()=>goAI(m.q, m)} disabled={!!busy} style={{ background:"none", border:`1px solid ${S.blue}`, color:S.blue, borderRadius:"9px", padding:"4px 10px", fontSize:"12px", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>🌐 {T("הרחבה מ-AI")}</button>}
+                {!m.ai && !m.err && m.q && !hasKey && m.conf < 0.6 && <button onClick={()=>setView("settings")} style={{ background:"none", border:"none", color:S.muted, fontSize:"11px", cursor:"pointer", fontFamily:"inherit", textDecoration:"underline" }}>{T("רוצה תשובה מהרשת? הוסף מפתח AI")}</button>}
+              </div>
+            </div>)}
+        {busy && <div style={{ color:S.muted, fontSize:"13px", padding:"6px" }}>{busy==="ai" ? "🌐 "+T("שואל את ה-AI...") : "🤔 "+T("חושב...")}</div>}
+        <div ref={endRef}/>
+      </div>
+      <div style={{ background:S.card, borderTop:`1px solid ${S.bdr}`, padding:"8px 10px calc(8px + env(safe-area-inset-bottom))" }}>
+        <div style={{ maxWidth:"760px", margin:"0 auto" }}>
+          {(!messages.length || messages.length < 3) && <div style={{ display:"flex", gap:"6px", overflowX:"auto", paddingBottom:"7px" }}>{sugg.map(s=> <button key={s} onClick={()=>send(s)} style={{ flexShrink:0, background:S.inner, border:`1px solid ${S.bdr}`, color:S.sub, borderRadius:"16px", padding:"6px 11px", fontSize:"12px", cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap" }}>{s}</button>)}</div>}
+          <div style={{ display:"flex", gap:"6px", alignItems:"flex-end" }}>
+            <Field area rows={1} value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } }} placeholder={listening ? T("מקשיב...") : T("שאל שאלה...")} aria-label={T("שאלה לעוזר")} style={{ minHeight:"44px", maxHeight:"120px", fontSize:"15px" }}/>
+            {SR && <Btn kind={listening?"danger":"ghost"} onClick={mic} label={T("דבר")} style={{ minWidth:"46px" }}>{listening?"⏹":"🎤"}</Btn>}
+            <Btn onClick={()=>send()} disabled={!q.trim() || !!busy} label={T("שלח")} style={{ minWidth:"52px" }}>➤</Btn>
+          </div>
+        </div>
+      </div>
+    </>}
+  </div>, document.body);
+}
+
 // ═══ MAIN APP ═══
 export default function App(){
   // navigation
@@ -307,6 +447,7 @@ export default function App(){
   const [scanBusy,setScanBusy] = useState(""); const [liveOn,setLiveOn] = useState(false); const [termCmd,setTermCmd] = useState("");
   const scanBuf = useRef(""); const scanCh = useRef(null); const scanWaiter = useRef(null); const scanQueue = useRef(Promise.resolve()); const scanProto = useRef("");
   const scanSup = useRef(null); const liveRef = useRef(false);
+  const liveHist = useRef({}); const [liveTick,setLiveTick] = useState(0); const [liveSel,setLiveSel] = useState(""); const recRef = useRef(false); const recRows = useRef([]); const [recOn,setRecOn] = useState(false);
   // vehicle (plate lookup / VIN)
   const [vehicle,setVehicle] = useState(null); const [vehicles,setVehicles] = useState([]);
   const [plateIn,setPlateIn] = useState(""); const [plateBusy,setPlateBusy] = useState(false); const [plateMsg,setPlateMsg] = useState("");
@@ -319,26 +460,31 @@ export default function App(){
   const [treeSel,setTreeSel] = useState(null); // { id, path:[nodeId] }
   const [cv,setCv] = useState({ vdL:"3", vdA:"1.5", vdI:"10", ledV:"14.4", ledF:"2.0", ledI:"20", drI:"60", drAh:"60", pwW:"120", pwV:"12" });
   const setC = (k,v) => setCv(p=>({ ...p, [k]:v }));
+  // assistant
+  const [assistOpen,setAssistOpen] = useState(false); const [assistView,setAssistView] = useState("chat");
+  const [chat,setChat] = useState([]); const [aiCfg,setAiCfg] = useState({ provider:"gemini", key:"", model:"", auto:true });
   // refs
   const rRef = useRef(null); const wlFRef = useRef(null); const importRef = useRef(null); const topRef = useRef(null);
   const hist = useRef({ guard:false }); const exitArm = useRef(false); const backRef = useRef(()=>{}); const pressT = useRef(null);
 
   // apply language + theme before painting children
-  ctx.lang = settings.lang; ctx.user = { name:settings.name, phone:settings.phone };
+  ctx.lang = settings.lang; ctx.user = { name:settings.name, phone:settings.phone, address:settings.address||"", bizId:settings.bizId||"", logo:settings.logo||"" };
   applyTheme(settings.theme);
   const dir = settings.lang==="en" ? "ltr" : "rtl";
 
   // ─── load ───
   useEffect(()=>{ (async()=>{
-    const [n,f,h,w,st,vh,vhs,dgs] = await Promise.all([loadData("adp_notes",{}),loadData("adp_favs",[]),loadData("adp_history",[]),loadData("adp_worklog",[]),loadData("adp_settings",DEFAULT_SETTINGS),loadData("adp_vehicle",null),loadData("adp_vehicles",[]),loadData("adp_diagrams",[])]);
+    const [n,f,h,w,st,vh,vhs,dgs,ch,ai] = await Promise.all([loadData("adp_notes",{}),loadData("adp_favs",[]),loadData("adp_history",[]),loadData("adp_worklog",[]),loadData("adp_settings",DEFAULT_SETTINGS),loadData("adp_vehicle",null),loadData("adp_vehicles",[]),loadData("adp_diagrams",[]),loadData("adp_chat",[]),loadData("adp_ai",null)]);
     const s2 = { ...DEFAULT_SETTINGS, ...st };
-    setNotes(n); setFavs(f); setHistory(h); setWorkLog(w); setSettings(s2); setVehicle(vh); setVehicles(vhs||[]); setDiagrams(dgs||[]); setLoaded(true);
+    setNotes(n); setFavs(f); setHistory(h); setWorkLog(w); setSettings(s2); setVehicle(vh); setVehicles(vhs||[]); setDiagrams(dgs||[]); setChat(ch||[]); if(ai) setAiCfg(p=>({ ...p, ...ai })); setLoaded(true);
     if(!s2.guideDone) setGuideStep(0);
   })(); },[]);
   useEffect(()=>{ if(loaded) saveData("adp_notes",notes); },[notes,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_vehicle",vehicle); },[vehicle,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_vehicles",vehicles); },[vehicles,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_diagrams",diagrams); },[diagrams,loaded]);
+  useEffect(()=>{ if(loaded) saveData("adp_chat",chat); },[chat,loaded]);
+  useEffect(()=>{ if(loaded) saveData("adp_ai",aiCfg); },[aiCfg,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_favs",favs); },[favs,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_history",history); },[history,loaded]);
   useEffect(()=>{ if(loaded) saveData("adp_worklog",workLog); },[workLog,loaded]);
@@ -372,6 +518,7 @@ export default function App(){
     if(imgView){ setImgView(null); return; }
     if(guideStep>=0){ finishGuide(); return; }
     if(dgSheet){ if(!dgBusy) setDgSheet(null); return; }
+    if(assistOpen){ if(assistView!=="chat") setAssistView("chat"); else setAssistOpen(false); return; }
     if(dgView){ setDgView(null); return; }
     if(wlSheet){ closeSheet(); return; }
     if(showHist){ setShowHist(false); return; }
@@ -461,9 +608,9 @@ export default function App(){
   }
   function deleteAll(){
     askConfirm({ text:T("למחוק את כל הנתונים? (יומן, הערות, תמונות, מועדפים, היסטוריה)"), ok:T("המשך"), danger:true, onOk:()=>setTimeout(()=>askConfirm({ text:T("בטוח? הפעולה לא ניתנת לביטול. מומלץ לגבות קודם."), ok:T("מחק הכל"), danger:true, onOk:async()=>{
-      await Promise.all(["adp_notes","adp_favs","adp_history","adp_worklog","adp_vehicle","adp_vehicles","adp_diagrams"].map(deleteData));
+      await Promise.all(["adp_notes","adp_favs","adp_history","adp_worklog","adp_vehicle","adp_vehicles","adp_diagrams","adp_chat","adp_ai"].map(deleteData));
       for(const m of diagrams) await deletePages(m.id, m.pages||0);
-      setNotes({}); setFavs([]); setHistory([]); setWorkLog([]); setVehicle(null); setVehicles([]); setDiagrams([]); toast(T("כל הנתונים נמחקו"));
+      setNotes({}); setFavs([]); setHistory([]); setWorkLog([]); setVehicle(null); setVehicles([]); setDiagrams([]); setChat([]); setAiCfg({ provider:"gemini", key:"", model:"", auto:true }); toast(T("כל הנתונים נמחקו"));
     } }),50) });
   }
   function shareApp(){
@@ -541,7 +688,7 @@ export default function App(){
     { name:"OBDLink", svc:"0000fef1-0000-1000-8000-00805f9b34fb", tx:"0000fef2-0000-1000-8000-00805f9b34fb", rx:"0000fef2-0000-1000-8000-00805f9b34fb" },
   ];
   const slog = m => setScanLog(p=>[...p.slice(-299), m]);
-  function resetScan(){ setScanCodes(null); setScanVin(""); setScanReady(null); setScanFF(null); setScanLive({}); scanSup.current=null; liveRef.current=false; setLiveOn(false); }
+  function resetScan(){ liveHist.current = {}; setLiveSel(""); recRef.current=false; setRecOn(false); setScanCodes(null); setScanVin(""); setScanReady(null); setScanFF(null); setScanLive({}); scanSup.current=null; liveRef.current=false; setLiveOn(false); }
   async function initElm(label){
     slog("⚙️ "+T("אתחול ELM327..."));
     const id = await scanSendCmd("ATZ",4000);
@@ -656,11 +803,30 @@ export default function App(){
   }
   const livePids = () => LIVE_PIDS.filter(p=>!scanSup.current || scanSup.current.has(p.pid));
   async function scanReadLiveOnce(){
+    const snap = {};
     for(const p of livePids()){
       if(!scanCh.current) break;
       const d = parsePID(await scanSendCmd("01"+p.pid,3000),p.pid);
-      setScanLive(prev=>({ ...prev, [p.pid]: d ? p.f(d) : "N/A" }));
+      const v = d ? p.f(d) : "N/A"; snap[p.pid] = v;
+      setScanLive(prev=>({ ...prev, [p.pid]: v }));
     }
+    // history for the graphs + optional recording
+    const H = liveHist.current; const t = Date.now();
+    for(const k in snap){ const n = parseFloat(snap[k]); if(!isFinite(n)) continue; (H[k] = H[k] || []).push(n); if(H[k].length > 120) H[k].shift(); }
+    if(recRef.current){ recRows.current.push({ t, ...snap }); if(recRows.current.length > 5000) recRows.current.shift(); }
+    setLiveTick(x=>x+1);
+  }
+  function recToggle(){
+    if(recRef.current){ recRef.current = false; setRecOn(false); toast(T("ההקלטה נעצרה — {n} דגימות",{ n:recRows.current.length })); return; }
+    recRows.current = []; recRef.current = true; setRecOn(true); if(!liveRef.current) toggleLive();
+  }
+  function recCsv(){
+    const rows = recRows.current; if(!rows.length) return;
+    const pids = LIVE_PIDS.filter(p=>rows.some(r=>r[p.pid]!==undefined));
+    const t0 = rows[0].t;
+    const head = ["time_s", ...pids.map(p=>`${en()?p.en:p.he} (${p.unit})`)].join(",");
+    const body = rows.map(r=>[((r.t-t0)/1000).toFixed(1), ...pids.map(p=>r[p.pid]===undefined?"":String(r[p.pid]).replace(/,/g,"."))].join(",")).join("\n");
+    download("\ufeff"+head+"\n"+body, `autodiag-live-${new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")}.csv`, "text/csv;charset=utf-8");
   }
   async function toggleLive(){
     if(liveRef.current){ liveRef.current=false; setLiveOn(false); return; }
@@ -722,6 +888,43 @@ export default function App(){
     }catch(err){ toast(T("❌ הקובץ אינו גיבוי סכמות של AutoDiag Pro")); } finally{ setDgBusy(""); }
   }
   function openLib(onlyVeh){ setDgOnlyVeh(!!onlyVeh); setDgQuery(""); refreshStore(); openSub("lib"); }
+
+  // ─── assistant glue ───
+  function assistCtx(){
+    const hasScan = !!(scanCodes || scanVin || scanReady || Object.keys(scanLive).length);
+    return { lang:settings.lang, vehicle, current: (tab==="code" && codeResult) ? { code:codeResult } : null,
+      scan: hasScan ? { codes:scanCodes, vin:scanVin, ready:scanReady, ff:scanFF, live:scanLive } : null,
+      notes, workLog, diagrams };
+  }
+  function openAssist(){ setAssistView("chat"); setAssistOpen(true); }
+  function assistAct(a){
+    if(!a) return;
+    const close = () => setAssistOpen(false);
+    if(a.type==="code"){ close(); searchCode(a.id); }
+    else if(a.type==="tree"){ close(); setTreeSel({ id:a.id, path:[TREES.find(t=>t.id===a.id).start] }); openSub("trees"); }
+    else if(a.type==="circuit"){ close(); setCircOpen(a.id); openSub("circuits"); }
+    else if(a.type==="sub"){ close(); if(a.id==="lib") openLib(false); else openSub(a.id); }
+    else if(a.type==="lib"){ close(); openLib(true); }
+    else if(a.type==="tab"){ close(); goTab(a.id); }
+    else if(a.type==="log"){ close(); setLogFilter(a.id); goTab("log"); }
+    else if(a.type==="plate"){ close(); goTab("home"); lookupPlate(a.id); }
+    else if(a.type==="diagram"){ const m = diagrams.find(x=>x.id===a.id); if(m){ close(); setDgView(m); } }
+  }
+  function assistActLabel(a){
+    const L2 = o => en() ? o.en : o.he;
+    switch(a.type){
+      case "code": return "⚠️ "+a.id;
+      case "tree": { const t = TREES.find(x=>x.id===a.id); return "🧭 "+(t?L2(t.title):T("עצי אבחון")); }
+      case "circuit": { const cc = CIRCUITS.find(x=>x.id===a.id); return "📘 "+(cc?(en()?cc.en.title:cc.he.title):T("סכמות טיפוסיות")); }
+      case "sub": return ({ ref:"📖 "+T("מידע טכני"), calc:"🧮 "+T("מחשבונים"), convert:"🔄 "+T("ממיר ומחשבון אוהם"), sensors:"📊 "+T("חיישנים ומצבר"), diag:"🩺 "+T("מחשבון אבחון"), wires:"🧵 "+T("חיווט"), lib:"📐 "+T("הסכמות שלי"), settings:"⚙️ "+T("הגדרות") })[a.id] || T(SUB_TITLES[a.id]||"");
+      case "lib": return "📐 "+T("הסכמות של הרכב");
+      case "tab": return ({ scan:"🔗 "+T("סורק"), log:"📋 "+T("יומן"), home:"🏠 "+T("בית"), code:"⚠️ "+T("קוד") })[a.id] || a.id;
+      case "log": return "📋 "+T("פתח ביומן");
+      case "plate": return "🔎 "+T("חפש במשרד התחבורה");
+      case "diagram": return "📐 "+T("פתח סכמה");
+      default: return "›";
+    }
+  }
 
   // ─── derived ───
   const actualMake = make==="__custom__" ? makeCustom : make;
@@ -804,6 +1007,7 @@ export default function App(){
     }
     const tiles = [
       ["⚠️","קוד תקלה",()=>goTab("code")],["🔗","סורק OBD",()=>goTab("scan")],["📋","יומן עבודה",()=>goTab("log")],
+      ["🤖","העוזר",openAssist],
       ["🔌","מיקום שקע OBD",()=>openSub("obd")],["🩺","מחשבון אבחון",()=>openSub("diag")],["📊","חיישנים ומצבר",()=>openSub("sensors")],
       ["🧵","חיווט",()=>openSub("wires")],["📐","סכמות חשמל",()=>openLib(false)],["📘","סכמות טיפוסיות",()=>openSub("circuits")],
       ["🧭","עצי אבחון",()=>{ setTreeSel(null); openSub("trees"); }],["📖","מידע טכני",()=>openSub("ref")],["🧮","מחשבונים",()=>openSub("calc")],
@@ -862,7 +1066,7 @@ export default function App(){
           <h3 style={h3()}>📍 {T("מיקום")}</h3><div style={{ background:S.inner, borderRadius:"10px", padding:"10px" }}><p style={{ color:S.sub, fontSize:"13px", lineHeight:1.6, margin:0 }}>{ci.location}</p></div>
           {circuitFor(ci.code) && (()=>{ const cc = CIRCUITS.find(x=>x.id===circuitFor(ci.code)); return cc ? <div style={{ marginTop:"10px" }}><Btn kind="blue" onClick={()=>{ setCircOpen(cc.id); openSub("circuits"); }} style={{ width:"100%" }}>📘 {T("סכמה טיפוסית")}: {en()?cc.en.title:cc.he.title}</Btn></div> : null; })()}
           {relatedCodes(ci.code).length>0 && <><h3 style={h3()}>🔗 {T("קודים קשורים")}</h3><div style={{ display:"flex", flexWrap:"wrap", gap:"5px" }}>{relatedCodes(ci.code).map(r=> <button key={r} onClick={()=>searchCode(r)} title={codeTitle(r)} style={{ background:S.inner, border:`1px solid ${S.bdr}`, borderRadius:"8px", padding:"5px 8px", cursor:"pointer", fontFamily:"inherit", textAlign:"start", maxWidth:"100%" }}><span style={{ color:S.acc, fontFamily:"monospace", fontWeight:700, fontSize:"12px" }}>{r}</span> <span style={{ color:S.muted, fontSize:"11px" }}>{codeTitle(r).replace(/^.*? — /,"").slice(0,28)}</span></button>)}</div></>}
-          <div style={{ marginTop:"10px" }}><Btn kind="ghost" onClick={()=>{ setTab("log"); openSheet(null,[ci.code]); }} style={{ width:"100%" }}>📋 {T("פתח רשומת יומן עם הקוד הזה")}</Btn></div>
+          <div style={{ marginTop:"10px", display:"flex", gap:"8px" }}><Btn kind="ghost" onClick={()=>{ setTab("log"); openSheet(null,[ci.code]); }} style={{ flex:1 }}>📋 {T("רשומת יומן")}</Btn><Btn kind="blue" onClick={openAssist} style={{ flex:1 }}>🤖 {T("שאל את העוזר")}</Btn></div>
         </Card>
         <Card title={"🔗 "+T("קישורים")}><div style={{ display:"flex", flexWrap:"wrap", gap:"6px" }}><YT q={`${ci.code} diagnosis fix`} l={T("תיקון {c}",{ c:ci.code })}/><YT q={`${ci.code} explained`} l={T("הסבר")}/><GG q={`${ci.code} sensor location`} l={T("תמונות")} img/><GG q={`${ci.code} repair guide`} l={T("מדריך")}/></div></Card>
         <NotesPanel sKey={`c_${ci.code}`} notes={notes} setNotes={setNotes} askConfirm={askConfirm} onOpenImg={setImgView}/>
@@ -921,14 +1125,22 @@ export default function App(){
           <p style={{ color:S.muted, fontSize:"12px", margin:"0 0 8px" }}>{T("בדיקות שהמחשב מריץ בעצמו בנסיעה. אחרי מחיקת קודים הן מתאפסות ומשלימות אחרי נסיעה של 50–100 ק\"מ.")}</p>
           <div style={{ display:"flex", flexWrap:"wrap", gap:"6px" }}>{scanReady.monitors.map(m=> <span key={m.key} style={{ padding:"5px 9px", borderRadius:"8px", fontSize:"12px", fontWeight:600, background:m.done?`${S.green}18`:`${S.warn}18`, color:m.done?S.green:S.warn, border:`1px solid ${m.done?S.green:S.warn}` }}>{m.done?"✓":"…"} {T(RD_NAMES[m.key]||m.key)}</span>)}</div>
         </Card>}
-        <Card title={"📊 "+T("נתונים בזמן אמת")}>
-          <div style={{ display:"flex", gap:"8px", marginBottom:"10px" }}>
+        <Card title={"📊 "+T("נתונים בזמן אמת")} actions={recOn ? <span style={{ color:S.red, fontSize:"12px", fontWeight:700 }}>● {T("מקליט · {n}",{ n:recRows.current.length })}</span> : null}>
+          <div style={{ display:"flex", gap:"8px", marginBottom:"10px", flexWrap:"wrap" }}>
             <Btn kind={liveOn?"danger":"blue"} onClick={toggleLive} style={{ flex:2 }}>{liveOn?"⏸️ "+T("עצור"):"▶️ "+T("הפעל קריאה רציפה")}</Btn>
             {!liveOn && <Btn kind="ghost" onClick={scanReadLiveOnce} style={{ flex:1 }}>🔄 {T("פעם אחת")}</Btn>}
+            <Btn kind={recOn?"danger":"ghost"} onClick={recToggle} style={{ flex:1 }}>{recOn?"⏹ "+T("עצור הקלטה"):"⏺ "+T("הקלט")}</Btn>
+            {!recOn && recRows.current.length>0 && <Btn kind="ghost" onClick={recCsv} style={{ flex:1 }}>📥 CSV ({recRows.current.length})</Btn>}
           </div>
+          {liveSel && (()=>{ const p = LIVE_PIDS.find(x=>x.pid===liveSel); const arr = liveHist.current[liveSel] || []; return <div style={{ background:S.inner, borderRadius:"12px", padding:"10px", marginBottom:"10px", border:`1px solid ${S.acc}` }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}><span style={{ color:S.acc, fontWeight:800, fontSize:"14px" }}>{p?(en()?p.en:p.he):liveSel} <span dir="ltr" style={{ color:S.text, unicodeBidi:"isolate" }}>{scanLive[liveSel]||"—"} {p&&p.unit}</span></span><IconBtn label={T("סגור גרף")} onClick={()=>setLiveSel("")}>✕</IconBtn></div>
+            <LiveChart data={arr} big/>
+            {arr.length>1 && <div style={{ display:"flex", justifyContent:"space-between", color:S.muted, fontSize:"12px" }} dir="ltr"><span>min {Math.min(...arr).toFixed(1)}</span><span>avg {(arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1)}</span><span>max {Math.max(...arr).toFixed(1)}</span></div>}
+          </div>; })()}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"6px" }}>
-            {livePids().map(p=> <div key={p.pid} style={{ background:S.inner, borderRadius:"10px", padding:"8px 4px", textAlign:"center" }}><p style={{ color:S.muted, fontSize:"11px", margin:"0 0 2px" }}>{en()?p.en:p.he}</p><span dir="ltr" style={{ color:S.acc, fontSize:"17px", fontWeight:800, fontFamily:"monospace", unicodeBidi:"isolate" }}>{scanLive[p.pid]||"—"}</span><p style={{ color:S.muted, fontSize:"10px", margin:"2px 0 0" }}>{p.unit}</p></div>)}
+            {livePids().map(p=> <button key={p.pid} onClick={()=>setLiveSel(liveSel===p.pid?"":p.pid)} style={{ background:S.inner, borderRadius:"10px", padding:"8px 4px 4px", textAlign:"center", border:`1px solid ${liveSel===p.pid?S.acc:"transparent"}`, cursor:"pointer", fontFamily:"inherit" }}><p style={{ color:S.muted, fontSize:"11px", margin:"0 0 2px" }}>{en()?p.en:p.he}</p><span dir="ltr" style={{ color:S.acc, fontSize:"17px", fontWeight:800, fontFamily:"monospace", unicodeBidi:"isolate" }}>{scanLive[p.pid]||"—"}</span><p style={{ color:S.muted, fontSize:"10px", margin:"2px 0 0" }}>{p.unit}</p><LiveChart data={liveHist.current[p.pid]}/></button>)}
           </div>
+          <p style={{ color:S.muted, fontSize:"11px", margin:"8px 0 0" }}>{T("לחץ על נתון כדי לראות גרף גדול. ההקלטה שומרת את כל הנתונים לקובץ CSV שנפתח באקסל.")}</p>
         </Card>
       </>}
       <Card title={"📋 "+T("יומן סורק")} actions={scanLog.length>0&&<IconBtn label={T("נקה")} onClick={()=>setScanLog([])}>🧹</IconBtn>}>
@@ -1262,6 +1474,14 @@ export default function App(){
       <Card title={"👤 "+T("פרטים לדוחות ושיתוף")}>
         {row(T("שם / שם העסק"), <Field value={settings.name} onChange={e=>setS({ name:e.target.value })} placeholder={T("למשל: ברק — חשמלאות רכב")}/>, T("מופיע בכל הדפסה, דוח ושיתוף"))}
         {row(T("טלפון (לא חובה)"), <Field type="tel" value={settings.phone} onChange={e=>setS({ phone:e.target.value })} placeholder="050-0000000" style={{ direction:"ltr", textAlign:"start" }}/>)}
+        {row(T("כתובת (לא חובה)"), <Field value={settings.address||""} onChange={e=>setS({ address:e.target.value })} placeholder={T("למשל: המלאכה 5, אשדוד")}/>)}
+        {row(T("ע.מ / ח.פ (לא חובה)"), <Field value={settings.bizId||""} onChange={e=>setS({ bizId:e.target.value })} inputMode="numeric" style={{ direction:"ltr", textAlign:"start" }}/>)}
+        {row(T("לוגו לדוחות (לא חובה)"), <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+          {settings.logo ? <img src={settings.logo} alt="" style={{ maxHeight:"56px", maxWidth:"130px", objectFit:"contain", background:"#fff", borderRadius:"8px", padding:"4px" }}/> : <span style={{ color:S.muted, fontSize:"12px" }}>{T("אין לוגו")}</span>}
+          <label style={{ cursor:"pointer" }}><input type="file" accept="image/*" style={{ display:"none" }} onChange={e=>{ const f = e.target.files?.[0]; e.target.value=""; if(f) logoFrom(f).then(d=>{ if(d) setS({ logo:d }); else toast(T("לא הצלחתי לקרוא את התמונה")); }); }}/><span style={{ display:"inline-block", border:`1px solid ${S.bdr}`, color:S.sub, borderRadius:"10px", padding:"9px 12px", fontSize:"13px", fontWeight:700 }}>🖼️ {settings.logo?T("החלף"):T("בחר תמונה")}</span></label>
+          {settings.logo && <Btn kind="danger" onClick={()=>askConfirm({ text:T("להסיר את הלוגו?"), ok:T("הסר"), danger:true, onOk:()=>setS({ logo:"" }) })}>✕</Btn>}
+        </div>, T("מופיע בראש דוח הלקוח וכל הדפסה, יחד עם השם, הטלפון והכתובת."))}
+        <Btn kind="ghost" onClick={()=>doPrint(T("דוגמה לדוח"), `<p>${esc(T("כך ייראה ראש הדוח שלך."))}</p>`, [])} style={{ width:"100%" }}>👁️ {T("תצוגה מקדימה של הדוח")}</Btn>
       </Card>
       <Card title={"🌐 "+T("שפה ותצוגה")}>
         {row(T("שפה"), seg([["he","עברית"],["en","English"]], settings.lang, v=>setS({ lang:v })))}
@@ -1385,6 +1605,8 @@ export default function App(){
 
       {dgSheet && <DiagramSheet key={dgSheet.meta?dgSheet.meta.id:"new"} init={dgSheet.meta} preset={dgVeh()} busy={dgBusy} onSave={saveDiagram} onDelete={deleteDiagram} onClose={()=>setDgSheet(null)} askConfirm={askConfirm} backArrow={backArrow}/>}
       {dgView && <DiagramViewer meta={dgView} onClose={()=>setDgView(null)} onMarks={mk=>setMarks(dgView.id, mk)} onEdit={()=>setDgSheet({ meta:dgView })} askConfirm={askConfirm} backArrow={backArrow}/>}
+      {!assistOpen && !dgView && !dgSheet && !wlSheet && guideStep<0 && <button onClick={openAssist} aria-label={T("העוזר")} style={{ position:"fixed", zIndex:60, bottom:"calc(78px + env(safe-area-inset-bottom))", insetInlineEnd:"14px", width:"54px", height:"54px", borderRadius:"50%", border:`2px solid ${S.acc}`, background:S.card, color:S.acc, fontSize:"26px", boxShadow:"0 4px 14px rgba(0,0,0,.45)", cursor:"pointer" }}>🤖</button>}
+      {assistOpen && <AssistantPanel onClose={()=>setAssistOpen(false)} getCtx={assistCtx} messages={chat} setMessages={setChat} aiCfg={aiCfg} setAiCfg={setAiCfg} onAction={assistAct} actLabel={assistActLabel} askConfirm={askConfirm} backArrow={backArrow} view={assistView} setView={setAssistView}/>}
       {/* onboarding guide */}
       {guideStep>=0 && <div style={{ ...overlay, zIndex:400 }}><div role="dialog" aria-modal="true" style={{ background:S.card, borderRadius:"18px", border:`2px solid ${S.acc}`, width:"100%", maxWidth:"380px", padding:"22px 18px", textAlign:"center" }}>
         <div style={{ fontSize:"46px" }}>{guideSteps[guideStep][0]}</div>

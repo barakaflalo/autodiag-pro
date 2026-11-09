@@ -343,6 +343,7 @@ for(const [code, make, en, he, sev, safe, cH, cE, sH, sE] of MAKER){
 const FAM_CIRC = { inj:"injector", injLH:"injector", coil:"injector", coilLH:"injector", ulost:"can", fpump:"relay", fan:"relay", start:"starter", charge:"charging", volt:"charging", pedD:"sensor3", pedE:"sensor3", dpfP:"sensor3", glow:"relay", ecm:"sensor3" };
 for(const row of SENSORS){ const k = row[5]; if(k==="ref5") FAM_CIRC[row[2]] = "sensor3"; else if(k==="ntc") FAM_CIRC[row[2]] = "ntc"; }
 const EXTRA_CIRC = { P0230:"relay", P0480:"relay", P0481:"relay", P0562:"charging", P0563:"charging", P0560:"charging", U0001:"can", U0073:"can", U0010:"can", U0019:"can", U0028:"can", P0685:"relay", P0627:"relay", P0628:"relay", P0629:"relay" };
+export const REF5_FAMS = new Set(SENSORS.filter(r=>r[5]==="ref5").map(r=>r[2]));
 export function circuitFor(code){ return EXTRA_CIRC[code] || FAM_CIRC[FAMILY[code]] || ""; }
 
 export { GEN, GEN_EN, FAMILY, FAMILIES };

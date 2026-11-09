@@ -1,6 +1,6 @@
 // AutoDiag Pro — built-in data (Hebrew is the source language)
 import { GEN, FAMILY, FAMILIES, circuitFor } from "./codes_gen.js";
-export { circuitFor };
+export { circuitFor, FAMILY };
 const CODES_DB = {
 // ═══ P0xxx — POWERTRAIN GENERIC ═══
 "P0010":{en:"Camshaft Position Actuator Circuit (Bank 1)",he:"מעגל מפעיל גל זיזים A (בנק 1)",severity:"בינונית",safe:"כן",desc:"תקלה במעגל VVT בנק 1.",causes:["סולנואיד VVT תקול","חיווט/מחבר","שמן מלוכלך","ECM"],steps:["בדוק רמת שמן ומצבו","בדוק מחבר VVT","מדוד התנגדות סולנואיד (7-12Ω)","בדוק חיווט","החלף סולנואיד"],location:"סולנואיד VVT בראש מנוע, ליד גל זיזים, בנק 1."},

@@ -5,7 +5,7 @@
 const DG = "https://data.gov.il/api/3/action/datastore_search";
 const RES_MAIN = "053cea08-09bc-40ec-8f7a-156f0677aff3"; // private & commercial vehicles (active)
 const RES_WLTP = "142afde2-6228-49f9-8a29-9b6c3a0cbe40"; // model specs: engine cc, hp, gearbox
-const UA = { "User-Agent": "AutoDiagPro/1.4 (+https://autodiag-pro.pages.dev)", "Accept": "application/json" };
+const UA = { "User-Agent": "AutoDiagPro/1.5 (+https://autodiag-pro.pages.dev)", "Accept": "application/json" };
 
 function json(body, status = 200, extra = {}){
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...extra } });
