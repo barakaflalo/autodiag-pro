@@ -11,6 +11,6 @@ npm install
 התוצאה נוצרת ב-`source/dist/` — את התוכן שלה מעלים לשורש הריפו.
 
 ## מספר גרסה
-בכל עדכון מעלים את המספר בשלושה מקומות יחד: `src/App.jsx` (APP_VERSION), `package.json`, `public/manifest.json`. סקריפט הבנייה עוצר אם הם לא תואמים, ומכניס את אותו מספר ל-sw.js.
+בכל עדכון מעלים את המספר בשלושה מקומות יחד: `src/lib.js` (APP_VERSION), `package.json`, `public/manifest.json`. סקריפט הבנייה עוצר אם הם לא תואמים, ומכניס את אותו מספר ל-sw.js.
 
 © 2026 ברק אפללו · AppNest

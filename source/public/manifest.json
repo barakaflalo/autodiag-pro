@@ -2,7 +2,7 @@
   "name": "AutoDiag Pro — אבחון רכב",
   "short_name": "AutoDiag Pro",
   "description": "אפליקציית אבחון רכב לחשמלאי רכב",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "id": "./",
   "start_url": "./",
   "scope": "./",

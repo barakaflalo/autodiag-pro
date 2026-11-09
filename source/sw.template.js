@@ -52,13 +52,17 @@ self.addEventListener('fetch', e => {
   if (url.origin !== self.location.origin) return; // YouTube, Google, wa.me — not ours
 
   if (req.mode === 'navigate') {
+    // only the app page itself is stored as the offline shell ("./"); other pages are cached under their own URL
+    const scopePath = new URL(self.registration.scope).pathname;
+    const isShell = url.pathname === scopePath || url.pathname === scopePath + 'index.html';
+    const key = isShell ? './' : req;
     e.respondWith((async () => {
       try {
         const res = await Promise.race([fetch(req), timeout(4000)]);
-        if (res && res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put('./', copy)).catch(() => {}); }
+        if (res && res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(key, copy)).catch(() => {}); }
         return res;
       } catch (err) {
-        const cached = await caches.match('./', {ignoreSearch: true});
+        const cached = (!isShell && await caches.match(url.pathname.replace(/\.html$/, '') + '.html', {ignoreSearch: true})) || await caches.match(key, {ignoreSearch: true}) || await caches.match('./', {ignoreSearch: true});
         if (cached) return cached;
         try { return await fetch(req); } catch (e2) {
           return new Response('<!DOCTYPE html><meta charset="utf-8"><body style="background:#0F172A;color:#F59E0B;font-family:Arial;text-align:center;padding:40px" dir="rtl"><h2>🔧 AutoDiag Pro</h2><p>אין חיבור לאינטרנט, והאפליקציה עוד לא נשמרה במכשיר.<br>פתחו אותה פעם אחת עם אינטרנט.</p></body>', {headers: {'Content-Type': 'text/html; charset=utf-8'}});
