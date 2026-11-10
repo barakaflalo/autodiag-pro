@@ -75,6 +75,19 @@ export function parsePID(raw,pid){
   for(const l of elmLines(raw)){const h=l.replace(/\s/g,"").toUpperCase();if(h.startsWith(want)&&/^[0-9A-F]+$/.test(h))return h.slice(want.length);}
   return null;
 }
+// every ECU that answered (CAN cars: engine 7E8 + gearbox 7E9 often both answer)
+export function parsePIDAll(raw,pid){
+  const want=("41"+pid).toUpperCase(); const out=[];
+  for(const l of elmLines(raw)){const h=l.replace(/\s/g,"").toUpperCase();if(h.startsWith(want)&&/^[0-9A-F]+$/.test(h))out.push(h.slice(want.length));}
+  return out;
+}
+// readiness from several ECUs: the engine ECU is the one reporting the most monitors
+export function mergeReadiness(list){
+  const rs = list.map(decodeReadiness).filter(Boolean); if(!rs.length) return null;
+  rs.sort((a,b)=>b.monitors.length-a.monitors.length);
+  const best = { ...rs[0] }; best.mil = rs.some(r=>r.mil); best.dtcCount = Math.max(...rs.map(r=>r.dtcCount)); best.ecus = rs.length;
+  return best;
+}
 function decodeDTC(b1,b2){
   const n=parseInt(b1[0],16);
   return ["P","C","B","U"][n>>2]+(n&3).toString(16)+b1[1]+b2;
@@ -112,7 +125,7 @@ export function openExt(url){
 
 
 // ═══ App context shared with non-React helpers (print/share) ═══
-export const APP_VERSION = "1.5.0";
+export const APP_VERSION = "1.5.1";
 export const ctx = { lang: "he", user: { name: "", phone: "", address: "", bizId: "", logo: "" } };
 export const ABOUT = {
   title: "AutoDiag Pro",
@@ -200,7 +213,8 @@ export function elmMessages(raw){
 export function parseVIN(raw){
   const msgs = elmMessages(raw).filter(h=>h.startsWith("4902"));
   let bytes=[];
-  if(msgs.length===1 && msgs[0].length>=40){ bytes = (msgs[0].slice(4).match(/../g)||[]).slice(1); } // CAN: 49 02 01 + 17 chars
+  const full = msgs.find(m=>m.length>=40);
+  if(full){ bytes = (full.slice(4).match(/../g)||[]).slice(1); } // CAN: 49 02 01 + 17 chars (first ECU that sent a full VIN)
   else { for(const m of msgs){ bytes = bytes.concat((m.slice(4).match(/../g)||[]).slice(1)); } }         // legacy: 49 02 seq + 4 bytes
   const s = bytes.map(b=>parseInt(b,16)).filter(n=>n>0).map(n=>String.fromCharCode(n)).join("").replace(/[^A-HJ-NPR-Z0-9]/gi,"").toUpperCase();
   return s.length>=17 ? s.slice(-17) : "";
@@ -238,6 +252,11 @@ export function parseFF(raw,pid){
   return null;
 }
 const B = (d,i)=>parseInt(d.slice(i*2,i*2+2),16);
+const S16 = (a,b) => { const v = a*256+b; return v>32767 ? v-65536 : v; };
+const trim = d => ((B(d,0)-128)*100/128).toFixed(1);
+const FUELSYS = { 1:["פתוחה (קר)","Open (cold)"], 2:["סגורה ✓","Closed ✓"], 4:["פתוחה (עומס/האטה)","Open (load/decel)"], 8:["פתוחה (תקלה)","Open (fault)"], 16:["סגורה (תקלה בחיישן)","Closed (sensor fault)"] };
+// groups: basic · fuel (mixture) · o2 (oxygen / A-F sensors) · emis (emissions & EVAP) · count (counters)
+export const LIVE_GROUPS = [["basic","בסיסי","Basic"],["fuel","תערובת ודלק","Mixture & fuel"],["o2","חיישני חמצן","O2 sensors"],["emis","פליטה ו-EVAP","Emissions & EVAP"],["count","מונים","Counters"]];
 export const LIVE_PIDS = [
   { pid:"0C", he:"סל\"ד", en:"RPM", unit:"rpm", f:d=>((B(d,0)*256+B(d,1))/4).toFixed(0) },
   { pid:"0D", he:"מהירות", en:"Speed", unit:"km/h", f:d=>String(B(d,0)) },
@@ -256,12 +275,67 @@ export const LIVE_PIDS = [
   { pid:"33", he:"לחץ ברומטרי", en:"Baro", unit:"kPa", f:d=>String(B(d,0)) },
   { pid:"1F", he:"זמן ריצה", en:"Run time", unit:"s", f:d=>String(B(d,0)*256+B(d,1)) },
   { pid:"A6", he:"ק\"מ (מחשב)", en:"Odometer", unit:"km", f:d=>((((B(d,0)*256+B(d,1))*256+B(d,2))*256+B(d,3))/10).toFixed(0) },
+  // mixture & fuel
+  { pid:"03", g:"fuel", he:"מערכת דלק (לולאה)", en:"Fuel system", unit:"", txt:true, f:d=>{ const x = FUELSYS[B(d,0)]; return x ? (ctx.lang==="en"?x[1]:x[0]) : "—"; } },
+  { pid:"08", g:"fuel", he:"STFT B2", en:"STFT B2", unit:"%", f:trim },
+  { pid:"09", g:"fuel", he:"LTFT B2", en:"LTFT B2", unit:"%", f:trim },
+  { pid:"44", g:"fuel", he:"למבדה מבוקשת", en:"Cmd. lambda", unit:"λ", f:d=>((B(d,0)*256+B(d,1))*2/65536).toFixed(3) },
+  { pid:"43", g:"fuel", he:"עומס מוחלט", en:"Abs. load", unit:"%", f:d=>((B(d,0)*256+B(d,1))*100/255).toFixed(0) },
+  { pid:"23", g:"fuel", he:"לחץ מסילה", en:"Rail pressure", unit:"bar", f:d=>((B(d,0)*256+B(d,1))*10/100).toFixed(0) },
+  { pid:"0A", g:"fuel", he:"לחץ דלק", en:"Fuel pressure", unit:"kPa", f:d=>String(B(d,0)*3) },
+  { pid:"5E", g:"fuel", he:"צריכת דלק", en:"Fuel rate", unit:"L/h", f:d=>((B(d,0)*256+B(d,1))/20).toFixed(1) },
+  { pid:"45", g:"fuel", he:"מצערת יחסית", en:"Rel. throttle", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"4C", g:"fuel", he:"מצערת מבוקשת", en:"Cmd. throttle", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"49", g:"fuel", he:"דוושת גז D", en:"Pedal D", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  // O2 / A-F sensors (numbering per PID 13: 1-4 bank 1, 5-8 bank 2)
+  { pid:"34", g:"o2", he:"A/F B1S1", en:"A/F B1S1", unit:"λ", f:d=>((B(d,0)*256+B(d,1))*2/65536).toFixed(3), f2:d=>((B(d,2)*256+B(d,3))/256-128).toFixed(2)+" mA" },
+  { pid:"38", g:"o2", he:"A/F B2S1", en:"A/F B2S1", unit:"λ", f:d=>((B(d,0)*256+B(d,1))*2/65536).toFixed(3), f2:d=>((B(d,2)*256+B(d,3))/256-128).toFixed(2)+" mA" },
+  { pid:"24", g:"o2", he:"A/F B1S1", en:"A/F B1S1", unit:"λ", f:d=>((B(d,0)*256+B(d,1))*2/65536).toFixed(3), f2:d=>((B(d,2)*256+B(d,3))*8/65536).toFixed(2)+" V" },
+  { pid:"28", g:"o2", he:"A/F B2S1", en:"A/F B2S1", unit:"λ", f:d=>((B(d,0)*256+B(d,1))*2/65536).toFixed(3), f2:d=>((B(d,2)*256+B(d,3))*8/65536).toFixed(2)+" V" },
+  { pid:"14", g:"o2", he:"O2 B1S1", en:"O2 B1S1", unit:"V", f:d=>(B(d,0)/200).toFixed(3) },
+  { pid:"15", g:"o2", he:"O2 B1S2 (אחורי)", en:"O2 B1S2 (rear)", unit:"V", f:d=>(B(d,0)/200).toFixed(3) },
+  { pid:"18", g:"o2", he:"O2 B2S1", en:"O2 B2S1", unit:"V", f:d=>(B(d,0)/200).toFixed(3) },
+  { pid:"19", g:"o2", he:"O2 B2S2 (אחורי)", en:"O2 B2S2 (rear)", unit:"V", f:d=>(B(d,0)/200).toFixed(3) },
+  // emissions & EVAP
+  { pid:"2E", g:"emis", he:"Purge מבוקש", en:"Cmd. purge", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  { pid:"32", g:"emis", he:"לחץ אדי דלק", en:"EVAP pressure", unit:"Pa", f:d=>(S16(B(d,0),B(d,1))/4).toFixed(0) },
+  { pid:"3C", g:"emis", he:"טמפ׳ קטליזטור B1", en:"Cat temp B1", unit:"°C", f:d=>((B(d,0)*256+B(d,1))/10-40).toFixed(0) },
+  { pid:"3D", g:"emis", he:"טמפ׳ קטליזטור B2", en:"Cat temp B2", unit:"°C", f:d=>((B(d,0)*256+B(d,1))/10-40).toFixed(0) },
+  { pid:"46", g:"emis", he:"טמפ׳ סביבה", en:"Ambient", unit:"°C", f:d=>String(B(d,0)-40) },
+  { pid:"2C", g:"emis", he:"EGR מבוקש", en:"Cmd. EGR", unit:"%", f:d=>(B(d,0)*100/255).toFixed(0) },
+  // counters
+  { pid:"31", g:"count", he:"ק\"מ מאז מחיקת קודים", en:"km since clear", unit:"km", f:d=>String(B(d,0)*256+B(d,1)) },
+  { pid:"30", g:"count", he:"התחממויות מאז מחיקה", en:"Warm-ups since clear", unit:"", f:d=>String(B(d,0)) },
+  { pid:"4E", g:"count", he:"דקות מאז מחיקה", en:"Min since clear", unit:"min", f:d=>String(B(d,0)*256+B(d,1)) },
+  { pid:"21", g:"count", he:"ק\"מ עם נורית דולקת", en:"km with MIL on", unit:"km", f:d=>String(B(d,0)*256+B(d,1)) },
+  { pid:"4D", g:"count", he:"דקות עם נורית", en:"Min with MIL", unit:"min", f:d=>String(B(d,0)*256+B(d,1)) },
 ];
+const BASIC_FUEL = ["06","07","0B","10"];
+for(const p of LIVE_PIDS){ if(!p.g) p.g = BASIC_FUEL.includes(p.pid) ? "fuel" : "basic"; }
+// the basic group also shows the short-term trims, so a glance at idle says something
+export const pidsOfGroup = g => LIVE_PIDS.filter(p=>p.g===g || (g==="basic" && ["06","08"].includes(p.pid)));
+
+// ═══ Mode 06 (CAN): on-board test results — misfire counts per cylinder (MID A2.., TID 0B average / 0C current) ═══
+export function parseMode06(raw){
+  const recs = [];
+  for(const m of elmMessages(raw)){
+    if(!m.startsWith("46")) continue;
+    const b = (m.slice(2).match(/../g)||[]).map(x=>parseInt(x,16));
+    for(let i=0;i+8<b.length;i+=9) recs.push({ mid:b[i], tid:b[i+1], uas:b[i+2], val:b[i+3]*256+b[i+4], min:b[i+5]*256+b[i+6], max:b[i+7]*256+b[i+8] });
+  }
+  return recs;
+}
+export function mode06Supported(raw, base){
+  const m = elmMessages(raw).find(h=>h.startsWith("46"+base)); if(!m) return new Set();
+  const n = parseInt(m.slice(4,12),16); const s = new Set();
+  for(let i=0;i<32;i++) if(n & (1<<(31-i))) s.add((parseInt(base,16)+i+1));
+  return s;
+}
 
 // ═══ Demo adapter: answers like a real ELM327 so the scanner can be tried without a car ═══
 export function makeDemoAdapter(){
   const vin = "JTDBR32E720123456";
-  const sup = ["01","03","04","05","06","07","0B","0C","0D","0E","0F","10","11","1C","1F","20","2F","33","40","42","5C"];
+  const sup = ["01","03","04","05","06","07","08","09","0B","0C","0D","0E","0F","10","11","13","15","19","1C","1F","20","21","2E","2F","30","31","32","33","34","38","3C","3D","40","42","44","46","4E","5C"];
   const mask = (base) => { let m=0; for(const p of sup){ const n=parseInt(p,16)-parseInt(base,16); if(n>=1&&n<=32) m |= (1<<(32-n)); } return ("41"+base+(m>>>0).toString(16).toUpperCase().padStart(8,"0")); };
   const hex = (n,len=2)=>Math.max(0,Math.round(n)).toString(16).toUpperCase().padStart(len,"0");
   let t0 = Date.now(); let cleared = false;
@@ -270,7 +344,16 @@ export function makeDemoAdapter(){
     switch(pid){ case "0C": return hex(rpm*4,4); case "0D": return "00"; case "05": return hex(88+40); case "42": return hex(14100+Math.sin(s)*80,4);
       case "04": return hex(22*2.55); case "11": return hex(15*2.55); case "06": return hex(128+Math.sin(s*3)*4); case "07": return hex(128+6);
       case "0B": return hex(33); case "10": return hex(320+Math.sin(s)*20,4); case "0F": return hex(31+40); case "0E": return hex((8+64)*2); case "5C": return hex(92+40);
-      case "2F": return hex(60*2.55); case "33": return hex(101); case "1F": return hex(s+300,4); default: return null; } };
+      case "2F": return hex(60*2.55); case "33": return hex(101); case "1F": return hex(s+300,4);
+      case "03": return "0200"; case "08": return hex(128-26+Math.sin(s*3)*3); case "09": return hex(128+3);
+      case "34": case "38": return hex((1+Math.sin(s*2)*0.01)*32768,4)+"8000"; case "15": case "19": return hex(0.68*200)+"FF";
+      case "2E": return hex(35*2.55); case "32": return "FFF0"; case "3C": case "3D": return hex((520+40)*10,4); case "44": return hex(32768,4);
+      case "46": return hex(24+40); case "31": return hex(1840,4); case "30": return hex(52); case "21": return "0000"; case "4E": return hex(2900,4);
+      default: return null; } };
+  // mode 06 misfire records for 6 cylinders (cylinder 3 is misfiring)
+  const m06 = (mid) => { const cyl = mid-0xA1; const cur = cyl===3 ? 37 : (cyl===5 ? 2 : 0), avg = cyl===3 ? 21 : 0;
+    const bytes = ["46", hex(mid), "0B", "24", hex(avg,4), "0000", "FFFF", hex(mid), "0C", "24", hex(cur,4), "0000", "FFFF"].join("").match(/../g);
+    const out = [bytes.length.toString(16).toUpperCase().padStart(3,"0")]; out.push("0:"+bytes.slice(0,6).join("")); let i=6, seq=1; while(i<bytes.length){ out.push((seq%16).toString(16).toUpperCase()+":"+bytes.slice(i,i+7).join("").padEnd(14,"0")); i+=7; seq++; } return out.join("\r"); };
   return {
     demo: true, name: "DEMO", properties: { write: true },
     respond(cmd){
@@ -286,6 +369,8 @@ export function makeDemoAdapter(){
       if(c==="0A") return "4A00\r\r>";
       if(c==="04") { cleared = true; return "44\r\r>"; }
       if(c==="0902") return vinFrames()+"\r\r>";
+      if(c==="06A0") return "46A0FE000000\r\r>";
+      if(/^06A[2-7]$/.test(c)) return m06(parseInt(c.slice(2),16))+"\r\r>";
       if(c==="020200") return (cleared ? "NO DATA" : "4202000107")+"\r\r>";
       if(/^02[0-9A-F]{2}00$/.test(c)) { const v = cleared ? null : live(c.slice(2,4)); return (v ? "42"+c.slice(2,4)+"00"+v : "NO DATA")+"\r\r>"; }
       if(/^01[0-9A-F]{2}$/.test(c)) { const v = live(c.slice(2)); return (v ? "41"+c.slice(2)+v : "NO DATA")+"\r\r>"; }

@@ -8,7 +8,7 @@ import { askAI, AI_PROVIDERS, cleanKey } from "./ai.js";
 import { DIN, WIRES, FUSES, PROTOCOLS, SECTIONS, E12, FUSE_STEPS } from "./techref.js";
 import { CODES_DB, CAR_MODELS, CAR_MAKES, SYMPTOMS, SENSOR_REF, WIRE_TYPES, WIRE_COLORS, CONVERSIONS, BATTERY_TABLE, DICT, makeFromHe, relatedCodes, circuitFor } from "./data.js";
 import { CODES_EN, SAFE_EN, SYMPTOMS_EN, SENSORS_EN, WIRE_TYPES_EN, WIRE_COLORS_EN, CONV_CAT_EN, BATTERY_EN } from "./data_en.js";
-import { APP_VERSION, ABOUT, ctx, L, uid, esc, loadData, saveData, deleteData, resizeImage, openExt, toast, doPrint, shareText, shareWhatsApp, elmLines, protoName, isCanProto, parsePID, parseDTCs, parseVIN, decodeReadiness, parseSupported, parseFF, LIVE_PIDS, makeDemoAdapter, fmtPlate } from "./lib.js";
+import { APP_VERSION, ABOUT, ctx, L, uid, esc, loadData, saveData, deleteData, resizeImage, openExt, toast, doPrint, shareText, shareWhatsApp, elmLines, protoName, isCanProto, parsePID, parseDTCs, parseVIN, decodeReadiness, parseSupported, parseFF, LIVE_PIDS, LIVE_GROUPS, pidsOfGroup, parsePIDAll, mergeReadiness, parseMode06, mode06Supported, makeDemoAdapter, fmtPlate } from "./lib.js";
 import { S, THEMES, THEME_ORDER, applyTheme } from "./theme.js";
 import { T } from "./i18n.js";
 
@@ -448,6 +448,8 @@ export default function App(){
   const scanBuf = useRef(""); const scanCh = useRef(null); const scanWaiter = useRef(null); const scanQueue = useRef(Promise.resolve()); const scanProto = useRef("");
   const scanSup = useRef(null); const liveRef = useRef(false);
   const liveHist = useRef({}); const [liveTick,setLiveTick] = useState(0); const [liveSel,setLiveSel] = useState(""); const recRef = useRef(false); const recRows = useRef([]); const [recOn,setRecOn] = useState(false);
+  const [liveGroup,setLiveGroupS] = useState("basic"); const liveGroupRef = useRef("basic"); const setLiveGroup = g => { liveGroupRef.current = g; setLiveGroupS(g); setLiveSel(""); };
+  const [scanMis,setScanMis] = useState(null);
   // vehicle (plate lookup / VIN)
   const [vehicle,setVehicle] = useState(null); const [vehicles,setVehicles] = useState([]);
   const [plateIn,setPlateIn] = useState(""); const [plateBusy,setPlateBusy] = useState(false); const [plateMsg,setPlateMsg] = useState("");
@@ -688,7 +690,7 @@ export default function App(){
     { name:"OBDLink", svc:"0000fef1-0000-1000-8000-00805f9b34fb", tx:"0000fef2-0000-1000-8000-00805f9b34fb", rx:"0000fef2-0000-1000-8000-00805f9b34fb" },
   ];
   const slog = m => setScanLog(p=>[...p.slice(-299), m]);
-  function resetScan(){ liveHist.current = {}; setLiveSel(""); recRef.current=false; setRecOn(false); setScanCodes(null); setScanVin(""); setScanReady(null); setScanFF(null); setScanLive({}); scanSup.current=null; liveRef.current=false; setLiveOn(false); }
+  function resetScan(){ setScanMis(null); liveHist.current = {}; setLiveSel(""); recRef.current=false; setRecOn(false); setScanCodes(null); setScanVin(""); setScanReady(null); setScanFF(null); setScanLive({}); scanSup.current=null; liveRef.current=false; setLiveOn(false); }
   async function initElm(label){
     slog("⚙️ "+T("אתחול ELM327..."));
     const id = await scanSendCmd("ATZ",4000);
@@ -785,11 +787,11 @@ export default function App(){
   async function scanReadInfo(){
     if(!scanCh.current) return; setScanBusy("info");
     try{
-      const vin = parseVIN(await scanSendCmd("0902",6000));
-      if(vin){ setScanVin(vin); slog("🔑 VIN: "+vin); } else slog("ℹ️ "+T("הרכב לא מסר VIN (נפוץ ברכבים ישנים)"));
-      const rd = decodeReadiness(parsePID(await scanSendCmd("0101",4000),"01"));
+      const vraw = await scanSendCmd("0902",6000); const vin = parseVIN(vraw);
+      if(vin){ setScanVin(vin); slog("🔑 VIN: "+vin); } else slog("ℹ️ "+T("הרכב לא מסר VIN (נפוץ ברכבים ישנים)")+" · 0902 → "+(elmLines(vraw).join(" ").slice(0,90)||T("אין תשובה")));
+      const rd = mergeReadiness(parsePIDAll(await scanSendCmd("0101",4000),"01"));
       setScanReady(rd);
-      if(rd) slog(`💡 MIL ${rd.mil?T("דולקת"):T("כבויה")} · ${T("{n} קודים שמורים",{ n:rd.dtcCount })}`);
+      if(rd) slog(`💡 MIL ${rd.mil?T("דולקת"):T("כבויה")} · ${T("{n} קודים שמורים",{ n:rd.dtcCount })}${rd.ecus>1?" · "+T("{n} מחשבים ענו",{ n:rd.ecus }):""}`);
     } finally { setScanBusy(""); }
   }
   async function scanQuickRead(){ await scanReadInfo(); await scanReadDTCs(); }
@@ -801,20 +803,40 @@ export default function App(){
       else slog("⚠️ "+T("לא התקבל אישור מחיקה ({r}). נסה שוב עם מנוע כבוי והצתה דלוקה.",{ r:lines.join(" | ")||T("אין תשובה") }));
     } });
   }
-  const livePids = () => LIVE_PIDS.filter(p=>!scanSup.current || scanSup.current.has(p.pid));
+  const supPid = p => !scanSup.current || scanSup.current.has(p.pid);
+  const livePids = () => pidsOfGroup(liveGroupRef.current).filter(supPid).filter((p,i,arr)=>!(p.pid==="24"&&arr.some(x=>x.pid==="34")) && !(p.pid==="28"&&arr.some(x=>x.pid==="38")));
+  const groupsAvail = () => LIVE_GROUPS.filter(([g])=>pidsOfGroup(g).some(supPid));
   async function scanReadLiveOnce(){
     const snap = {};
     for(const p of livePids()){
       if(!scanCh.current) break;
       const d = parsePID(await scanSendCmd("01"+p.pid,3000),p.pid);
       const v = d ? p.f(d) : "N/A"; snap[p.pid] = v;
-      setScanLive(prev=>({ ...prev, [p.pid]: v }));
+      const v2 = d && p.f2 ? p.f2(d) : undefined;
+      setScanLive(prev=>({ ...prev, [p.pid]: v, ...(v2!==undefined ? { [p.pid+"_2"]: v2 } : {}) }));
     }
+    // the voltage at the OBD socket, every pass (the value at connect time can be from cranking)
+    if(scanCh.current && liveGroupRef.current==="basic"){ const rv = elmLines(await scanSendCmd("ATRV",1500)).find(l=>/\d/.test(l)); if(rv){ const bv = rv.replace(/[^\d.]/g,""); snap.batt = bv; setScanLive(prev=>({ ...prev, batt:bv })); } }
     // history for the graphs + optional recording
     const H = liveHist.current; const t = Date.now();
     for(const k in snap){ const n = parseFloat(snap[k]); if(!isFinite(n)) continue; (H[k] = H[k] || []).push(n); if(H[k].length > 120) H[k].shift(); }
     if(recRef.current){ recRows.current.push({ t, ...snap }); if(recRows.current.length > 5000) recRows.current.shift(); }
     setLiveTick(x=>x+1);
+  }
+  async function scanMisfire(){
+    if(!scanCh.current) return;
+    if(isCanProto(scanProto.current) === false){ toast(T("ספירת פספוסים זמינה רק ברכבי CAN")); return; }
+    setScanBusy("mis");
+    try{
+      const sup = mode06Supported(await scanSendCmd("06A0",4000),"A0");
+      const cyls = [...sup].filter(m=>m>=0xA2 && m<=0xAD).sort((a,b)=>a-b);
+      if(!cyls.length){ setScanMis([]); slog("ℹ️ "+T("הרכב לא מדווח ספירת פספוסים (Mode 06)")); return; }
+      const out = [];
+      for(const mid of cyls){ const recs = parseMode06(await scanSendCmd("06"+mid.toString(16).toUpperCase(),4000)).filter(r=>r.mid===mid);
+        const cur = recs.find(r=>r.tid===0x0C), avg = recs.find(r=>r.tid===0x0B);
+        out.push({ cyl: mid-0xA1, cur: cur ? cur.val : null, avg: avg ? avg.val : null }); }
+      setScanMis(out); slog("🔥 "+T("ספירת פספוסים נקראה ({n} צילינדרים)",{ n:out.length }));
+    } finally { setScanBusy(""); }
   }
   function recToggle(){
     if(recRef.current){ recRef.current = false; setRecOn(false); toast(T("ההקלטה נעצרה — {n} דגימות",{ n:recRows.current.length })); return; }
@@ -891,9 +913,9 @@ export default function App(){
 
   // ─── assistant glue ───
   function assistCtx(){
-    const hasScan = !!(scanCodes || scanVin || scanReady || Object.keys(scanLive).length);
+    const hasScan = !!(scanCodes || scanVin || scanReady || scanMis || Object.keys(scanLive).length);
     return { lang:settings.lang, vehicle, current: (tab==="code" && codeResult) ? { code:codeResult } : null,
-      scan: hasScan ? { codes:scanCodes, vin:scanVin, ready:scanReady, ff:scanFF, live:scanLive } : null,
+      scan: hasScan ? { codes:scanCodes, vin:scanVin, ready:scanReady, ff:scanFF, live:scanLive, mis:scanMis } : null,
       notes, workLog, diagrams };
   }
   function openAssist(){ setAssistView("chat"); setAssistOpen(true); }
@@ -1132,19 +1154,36 @@ export default function App(){
             <Btn kind={recOn?"danger":"ghost"} onClick={recToggle} style={{ flex:1 }}>{recOn?"⏹ "+T("עצור הקלטה"):"⏺ "+T("הקלט")}</Btn>
             {!recOn && recRows.current.length>0 && <Btn kind="ghost" onClick={recCsv} style={{ flex:1 }}>📥 CSV ({recRows.current.length})</Btn>}
           </div>
-          {liveSel && (()=>{ const p = LIVE_PIDS.find(x=>x.pid===liveSel); const arr = liveHist.current[liveSel] || []; return <div style={{ background:S.inner, borderRadius:"12px", padding:"10px", marginBottom:"10px", border:`1px solid ${S.acc}` }}>
+          {groupsAvail().length>1 && <div style={{ display:"flex", gap:"6px", overflowX:"auto", paddingBottom:"8px", marginBottom:"4px" }}>{groupsAvail().map(([g,he,enl])=> <Chip key={g} active={liveGroup===g} onClick={()=>setLiveGroup(g)}>{en()?enl:he} ({pidsOfGroup(g).filter(supPid).length})</Chip>)}</div>}
+          {liveSel && (()=>{ const p = liveSel==="batt" ? { he:"מתח במחבר OBD", en:"OBD socket voltage", unit:"V" } : LIVE_PIDS.find(x=>x.pid===liveSel); const arr = liveHist.current[liveSel] || []; return <div style={{ background:S.inner, borderRadius:"12px", padding:"10px", marginBottom:"10px", border:`1px solid ${S.acc}` }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}><span style={{ color:S.acc, fontWeight:800, fontSize:"14px" }}>{p?(en()?p.en:p.he):liveSel} <span dir="ltr" style={{ color:S.text, unicodeBidi:"isolate" }}>{scanLive[liveSel]||"—"} {p&&p.unit}</span></span><IconBtn label={T("סגור גרף")} onClick={()=>setLiveSel("")}>✕</IconBtn></div>
             <LiveChart data={arr} big/>
             {arr.length>1 && <div style={{ display:"flex", justifyContent:"space-between", color:S.muted, fontSize:"12px" }} dir="ltr"><span>min {Math.min(...arr).toFixed(1)}</span><span>avg {(arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1)}</span><span>max {Math.max(...arr).toFixed(1)}</span></div>}
           </div>; })()}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"6px" }}>
-            {livePids().map(p=> <button key={p.pid} onClick={()=>setLiveSel(liveSel===p.pid?"":p.pid)} style={{ background:S.inner, borderRadius:"10px", padding:"8px 4px 4px", textAlign:"center", border:`1px solid ${liveSel===p.pid?S.acc:"transparent"}`, cursor:"pointer", fontFamily:"inherit" }}><p style={{ color:S.muted, fontSize:"11px", margin:"0 0 2px" }}>{en()?p.en:p.he}</p><span dir="ltr" style={{ color:S.acc, fontSize:"17px", fontWeight:800, fontFamily:"monospace", unicodeBidi:"isolate" }}>{scanLive[p.pid]||"—"}</span><p style={{ color:S.muted, fontSize:"10px", margin:"2px 0 0" }}>{p.unit}</p><LiveChart data={liveHist.current[p.pid]}/></button>)}
+            {[...(liveGroup==="basic" && scanLive.batt ? [{ pid:"batt", he:"מתח במחבר OBD", en:"OBD socket voltage", unit:"V" }] : []), ...livePids()].map(p=> <button key={p.pid} onClick={()=>!p.txt && setLiveSel(liveSel===p.pid?"":p.pid)} style={{ background:S.inner, borderRadius:"10px", padding:"8px 4px 4px", textAlign:"center", border:`1px solid ${liveSel===p.pid?S.acc:"transparent"}`, cursor:p.txt?"default":"pointer", fontFamily:"inherit", minWidth:0 }}><p style={{ color:S.muted, fontSize:"11px", margin:"0 0 2px" }}>{en()?p.en:p.he}</p>{p.txt ? <span style={{ color:S.acc, fontSize:"13px", fontWeight:800 }}>{scanLive[p.pid]||"—"}</span> : <span dir="ltr" style={{ color:S.acc, fontSize:"17px", fontWeight:800, fontFamily:"monospace", unicodeBidi:"isolate" }}>{scanLive[p.pid]||"—"}</span>}<p style={{ color:S.muted, fontSize:"10px", margin:"2px 0 0" }} dir="ltr">{p.unit}{scanLive[p.pid+"_2"]?` · ${scanLive[p.pid+"_2"]}`:""}</p>{!p.txt && <LiveChart data={liveHist.current[p.pid]}/>}</button>)}
           </div>
           <p style={{ color:S.muted, fontSize:"11px", margin:"8px 0 0" }}>{T("לחץ על נתון כדי לראות גרף גדול. ההקלטה שומרת את כל הנתונים לקובץ CSV שנפתח באקסל.")}</p>
         </Card>
+        <Card title={"🔥 "+T("ספירת פספוסים לפי צילינדר")} actions={<IconBtn label={T("קרא ספירת פספוסים")} onClick={scanMisfire}>🔄</IconBtn>}>
+          <p style={{ color:S.muted, fontSize:"12px", margin:"0 0 8px" }}>{T("המחשב סופר פספוסים בכל צילינדר גם כשאין עדיין קוד. כך רואים צילינדר חלש לפני שהנורית נדלקת.")}</p>
+          {scanMis===null ? <Btn kind="ghost" onClick={scanMisfire} disabled={!!scanBusy} style={{ width:"100%" }}>{scanBusy==="mis"?"⏳ "+T("קורא..."):"🔥 "+T("קרא ספירת פספוסים")}</Btn>
+            : scanMis.length===0 ? <p style={{ color:S.sub, fontSize:"13px", margin:0 }}>{T("הרכב לא מדווח ספירת פספוסים (Mode 06)")}</p>
+            : (()=>{ const mx = Math.max(1, ...scanMis.map(m=>Math.max(m.cur||0, m.avg||0))); return <div>
+              <div style={{ display:"grid", gridTemplateColumns:"auto 1fr auto auto", gap:"6px 10px", alignItems:"center", fontSize:"13px" }}>
+                <span style={{ color:S.muted, fontSize:"11px" }}>{T("צילינדר")}</span><span/><span style={{ color:S.muted, fontSize:"11px" }}>{T("נסיעה אחרונה")}</span><span style={{ color:S.muted, fontSize:"11px" }}>{T("ממוצע")}</span>
+                {scanMis.map(m=>{ const bad = (m.cur||0) > 0 || (m.avg||0) > 0; return [
+                  <span key={m.cyl+"a"} style={{ color:bad?S.red:S.text, fontWeight:800 }}>#{m.cyl}</span>,
+                  <span key={m.cyl+"b"} style={{ height:"10px", borderRadius:"5px", background:S.inner, overflow:"hidden" }}><span style={{ display:"block", height:"100%", width:`${Math.max(m.cur||0,m.avg||0)/mx*100}%`, background:bad?S.red:S.green }}/></span>,
+                  <span key={m.cyl+"c"} style={{ color:(m.cur||0)>0?S.red:S.sub, fontWeight:700, fontFamily:"monospace", textAlign:"center" }}>{m.cur ?? "—"}</span>,
+                  <span key={m.cyl+"d"} style={{ color:(m.avg||0)>0?S.warn:S.sub, fontFamily:"monospace", textAlign:"center" }}>{m.avg ?? "—"}</span>]; })}
+              </div>
+              <p style={{ color:S.muted, fontSize:"11px", margin:"8px 0 0" }}>{T("מספור הצילינדרים לפי היצרן. ספירה גבוהה בצילינדר אחד → החלף סליל/פלאג/מזרק עם צילינדר אחר ובדוק אם הספירה עוברת.")}</p>
+            </div>; })()}
+        </Card>
       </>}
       <Card title={"📋 "+T("יומן סורק")} actions={scanLog.length>0&&<IconBtn label={T("נקה")} onClick={()=>setScanLog([])}>🧹</IconBtn>}>
-        {scanLog.length===0 ? <p style={{ color:S.muted, fontSize:"12px", textAlign:"center" }}>{T("עדיין לא התחברת")}</p> : <div style={{ maxHeight:"220px", overflowY:"auto" }}>{scanLog.map((l,i)=> <p key={i} dir="auto" style={{ color:S.sub, fontSize:"12px", margin:"3px 0", borderBottom:`1px solid ${S.bdr}`, paddingBottom:"3px", fontFamily:"monospace", wordBreak:"break-word" }}>{l}</p>)}</div>}
+        {scanLog.length===0 ? <p style={{ color:S.muted, fontSize:"12px", textAlign:"center" }}>{T("עדיין לא התחברת")}</p> : <div style={{ maxHeight:"220px", overflowY:"auto" }}>{scanLog.map((l,i)=> <p key={i} style={{ color:S.sub, fontSize:"12px", margin:"3px 0", borderBottom:`1px solid ${S.bdr}`, paddingBottom:"3px", fontFamily:"monospace", wordBreak:"break-word" }}>{l}</p>)}</div>}
         {conn && <div style={{ display:"flex", gap:"6px", marginTop:"8px" }}><Field value={termCmd} onChange={e=>setTermCmd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&scanTerminal()} placeholder={T("פקודה ידנית (למשל ATRV או 010C)")} aria-label={T("פקודה ידנית")} style={{ fontFamily:"monospace", direction:"ltr" }}/><Btn kind="ghost" onClick={scanTerminal}>{T("שלח")}</Btn></div>}
       </Card>
       <Card title={"💡 "+T("מדריך")}><div style={{ fontSize:"13px", color:S.sub, lineHeight:1.7 }}>
